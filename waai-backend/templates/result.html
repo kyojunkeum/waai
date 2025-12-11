@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ title }} - 결과</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>{{ title }} - 결과</h1>
+      <p class="muted">생성된 기획서를 아래에서 확인하세요.</p>
+    </div>
+    <nav>
+      <a href="/">기획 생성</a>
+      <a href="/dashboard">대시보드</a>
+    </nav>
+  </header>
+
+  <pre style="white-space: pre-wrap;">{{ result }}</pre>
+
+  <p>
+    결과 파일 경로: {{ file_path }}<br>
+    (WSL 기준 경로이며, Windows에서는 \\wsl$ 로 접근해서 열 수 있습니다.)
+  </p>
+
+  <p><a href="/">← 돌아가기</a></p>
+</body>
+</html>

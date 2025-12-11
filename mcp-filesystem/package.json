@@ -1,0 +1,9 @@
+{
+  "name": "mcp-filesystem",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "dependencies": {
+    "express": "^4.19.0"
+  }
+}

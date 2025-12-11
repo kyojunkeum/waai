@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>WAAI - Writer Assistant AI</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>WAAI - Writer Assistant AI</h1>
+      <p class="muted">일기 기반 기획서 생성 & 일기 자동 포맷</p>
+    </div>
+    <nav>
+      <a href="/dashboard">대시보드</a>
+    </nav>
+  </header>
+
+  <section class="card">
+    <h2>기획서 생성</h2>
+    <form action="/generate" method="post" class="form-grid">
+      <label>기획 제목
+        <input type="text" name="title" required>
+      </label>
+
+      <label>키워드(옵션)
+        <input type="text" name="keyword" placeholder="예: 아내, 빚, 회복">
+      </label>
+
+      <div class="row">
+        <label>시작일
+          <input type="date" name="start_date">
+        </label>
+        <label>종료일
+          <input type="date" name="end_date">
+        </label>
+      </div>
+
+      <div class="row">
+        <label>모드
+          <select name="mode">
+            <option value="outline">소설 기획안(개요)</option>
+            <option value="summary">기간 요약/분석</option>
+          </select>
+        </label>
+
+        <label>출력 형식
+          <select name="output_format">
+            <option value="txt">TXT</option>
+            <option value="md">Markdown</option>
+          </select>
+        </label>
+      </div>
+
+      <label>추가 지시사항 (옵션)
+        <textarea name="extra_instruction" rows="4"
+          placeholder="예: 주인공의 죄책감과 회복 과정을 강조해줘. 에피소드 예시도 몇 개 써줘."></textarea>
+      </label>
+
+      <div class="actions">
+        <button type="submit">기획 생성</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>일기 작성</h2>
+    <form action="/diary/create-form" method="post" class="form-grid">
+      <label>제목
+        <input type="text" name="title" required>
+      </label>
+
+      <div class="row">
+        <label>날짜(옵션)
+          <input type="date" name="date">
+        </label>
+        <label>시간(옵션)
+          <input type="time" name="time">
+        </label>
+      </div>
+
+      <label>원본 텍스트
+        <textarea name="raw_text" rows="8" required
+          placeholder="오늘 있었던 일을 자유롭게 적어주세요."></textarea>
+      </label>
+
+      <div class="actions">
+        <button type="submit">일기 생성 및 저장</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>일기 파일 목록</h2>
+    <ul class="file-list">
+      {% for f in diary_files %}
+        <li>{{ f }}</li>
+      {% else %}
+        <li class="muted">아직 일기가 없습니다.</li>
+      {% endfor %}
+    </ul>
+  </section>
+</body>
+</html>

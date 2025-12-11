@@ -1,0 +1,155 @@
+
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    # GPU 설정: nvidia-container-toolkit 설치되어 있어야 동작
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - OLLAMA_KEEP_ALIVE=5m
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  mcp-filesystem:
+    build: ./mcp-filesystem
+    container_name: mcp-filesystem
+    environment:
+      DIARY_ROOT: "/data/diary"
+    volumes:
+      - ./data/diary:/data/diary
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  mcp-diary:
+    build: ./mcp-diary
+    container_name: mcp-diary
+    environment:
+      DIARY_ROOT: "/data/diary"
+      LLM_BACKEND: "ollama"
+      OLLAMA_URL: "http://ollama:11434"
+      MODEL_NAME: "qwen2:7b"
+
+      # openai 용
+      # OPENAI_BASE_URL: "https://api.openai.com/v1"
+      # OPENAI_API_KEY: "..."
+      # OPENAI_MODEL: "gpt-4.1-mini"
+
+    volumes:
+      - ./data/diary:/data/diary
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://mcp-diary:7002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  waai-backend:
+    build: ./waai-backend
+    container_name: waai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_URL: "http://ollama:11434"
+      #MODEL_NAME: "llama3.1"
+      MODEL_NAME: "qwen2:7b"
+      OUTPUT_ROOT: "/data/outputs"
+      DIARY_ROOT: "/data/diary"
+    volumes:
+      - ./data/outputs:/data/outputs
+      - ./data/diary:/data/diary
+    depends_on:
+      - ollama
+      - mcp-filesystem
+      - mcp-diary
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://waai-backend:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  diary-format-bot:
+    build: ./diary-format-bot
+    container_name: diary-format-bot
+    environment:
+      - LLM_API_URL=http://waai-backend:8000/api/diary/format
+      - IGNORE_PROCESSED=true
+    volumes:
+      - /home/witness/memory/diary:/input
+      - ./data/diary:/output
+    depends_on:
+      - waai-backend
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  waai-monitor:
+    build: ./monitor
+    container_name: waai-monitor
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    environment:
+      - TARGET_URL=http://waai-backend:8000/health
+      - MCP_HEALTH=http://mcp-diary:7002/health
+      - MCP_FS_HEALTH=http://mcp-filesystem:7001/health
+      - DIARY_BOT_HEALTH=http://diary-format-bot:8001/health
+      - INTERVAL=60
+      - CPU_THRESHOLD=80
+      - GPU_THRESHOLD=80
+      - DIARY_DIR=/waai/data/diary
+    depends_on:
+      - waai-backend
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/diary:/waai/data/diary:ro
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: open-webui
+    restart: unless-stopped
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      ENABLE_CUSTOM_TOOLS: "1"
+    depends_on:
+      - ollama
+    ports:
+      - "3000:8080"
+    networks:
+      - waai-net
+    volumes:
+      - openwebui-data:/app/backend/data
+
+networks:
+  waai-net:
+
+volumes:
+  ollama-data:
+  openwebui-data:

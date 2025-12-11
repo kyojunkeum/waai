@@ -1,0 +1,83 @@
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  margin: 20px;
+  background: #f7f9fb;
+  color: #1f2a3d;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.muted { color: #6b7280; font-size: 0.95rem; }
+
+a {
+  color: #2563eb;
+  text-decoration: none;
+  margin-left: 12px;
+}
+
+a:hover { text-decoration: underline; }
+
+.card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+}
+
+.form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+  gap: 6px;
+}
+
+input, select, textarea {
+  padding: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 1rem;
+}
+
+textarea { resize: vertical; }
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+button {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+button:hover { background: #1d4ed8; }
+
+.file-list {
+  margin: 0;
+  padding-left: 18px;
+}

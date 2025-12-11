@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+<title>WAAI 대시보드</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>WAAI 대시보드</h1>
+      <div style="font-size: 0.9rem; color: #666;">
+        사용자: {{ user }}
+      </div>
+    </div>
+    <nav>
+      <a href="/">기획 생성 화면</a>
+    </nav>
+  </header>
+
+  <div class="card">
+    <h2>감정 흐름 (mood_score)</h2>
+    <canvas id="moodChart" width="900" height="320"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>프로젝트 타임라인 요약</h2>
+    <div id="projects">
+      {% for p in projects %}
+        <div style="margin-bottom: 16px;">
+          <h3>{{ p }}</h3>
+          {% set items = project_data.get(p, []) %}
+          {% if items %}
+            <p>총 {{ items|length }}개 일기</p>
+            <ul>
+              {% for item in items[:10] %}
+                <li>
+                  {{ item.date }} - {{ item.title or item.rel_path }}
+                  (mood_score: {{ item.mood_score }})
+                </li>
+              {% endfor %}
+            </ul>
+            {% if items|length > 10 %}
+              <p>... 외 {{ items|length - 10 }}개</p>
+            {% endif %}
+          {% else %}
+            <p>데이터 없음</p>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <script>
+    const moodStats = {{ mood_stats | tojson | safe }};
+
+    const labels = moodStats.map(s => s.date);
+    const avgData = moodStats.map(s => s.avg_mood_score);
+    const minData = moodStats.map(s => s.min_mood_score);
+    const maxData = moodStats.map(s => s.max_mood_score);
+
+    const ctx = document.getElementById('moodChart').getContext('2d');
+    const moodChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: '평균 mood_score',
+            data: avgData,
+            borderWidth: 2,
+            tension: 0.15
+          },
+          {
+            label: '최소 mood_score',
+            data: minData,
+            borderWidth: 1,
+            borderDash: [5, 5],
+            tension: 0.15
+          },
+          {
+            label: '최대 mood_score',
+            data: maxData,
+            borderWidth: 1,
+            borderDash: [5, 5],
+            tension: 0.15
+          },
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: {
+          mode: 'index',
+          intersect: false,
+        },
+        scales: {
+          y: {
+            beginAtZero: false
+          }
+        }
+      }
+    });
+  </script>
+</body>
+</html>
