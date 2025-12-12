@@ -11,12 +11,15 @@ async def list_diary_files():
     return r.json().get("files", [])
 
 async def summarize_diary(keyword: str | None, start_date: str | None,
-                          end_date: str | None, mode: str):
+                          end_date: str | None, mode: str,
+                          topic: str | None = None, extra_instruction: str | None = None):
     payload = {
         "keyword": keyword or None,
         "start_date": start_date or None,
         "end_date": end_date or None,
         "mode": mode,
+        "topic": topic or None,
+        "extra_instruction": extra_instruction or None,
     }
     async with httpx.AsyncClient(timeout=600.0) as client:
         r = await client.post(f"{MCP_DIARY_URL}/summarize", json=payload)

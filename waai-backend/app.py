@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import calendar
+import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 from starlette.templating import Jinja2Templates
 
 from mcp_client import (
@@ -18,6 +22,7 @@ from mcp_client import (
     list_diary_files,
     summarize_diary,
 )
+from utils.evidence import extract_sources_from_summary
 
 DIARY_ROOT = os.environ.get("DIARY_ROOT", "/data/diary")
 DIARY_OUTPUT_DIR = Path(DIARY_ROOT)
@@ -95,11 +100,15 @@ class PlanGenerateRequest(BaseModel):
     extra_instruction: str | None = None  # "가족/신앙 비중을 더 강조해줘" 같은 추가 지시
 
 
+class PlanGeneratePromptOnlyRequest(BaseModel):
+    prompt: str
+
+
 class PlanGenerateResponse(BaseModel):
     title: str        # 기획서 제목
     content: str      # 기획서 본문 (Open WebUI에서 바로 보여줄 내용)
     file_path: str    # /waai/data/outputs/... 저장된 경로
-
+    sources: list[dict[str, Any]] = Field(default_factory=list)   # 근거 목록 (필수, 비어도 포함)
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -211,6 +220,192 @@ def save_diary_markdown_to_dir(md_text: str) -> str:
 async def call_ollama_for_diary_format(prompt: str) -> str:
     # 별도 포맷 함수가 필요한 경우를 대비한 래퍼
     return await call_llm(prompt)
+
+
+def extract_json_block(text: str) -> str:
+    """
+    LLM이 앞뒤로 멘트를 붙이는 경우를 대비해 JSON 블록만 추출.
+    """
+    match = re.search(r"\{.*\}", text, re.S)
+    return match.group(0) if match else "{}"
+
+
+def _format_date(year: int, month: int, day: int | None = None, month_end: bool = False) -> str:
+    if day is None:
+        day = calendar.monthrange(year, month)[1] if month_end else 1
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _extract_keyword_from_prompt(user_prompt: str) -> str | None:
+    kw_match = re.search(r"[\"'“”‘’]([^\"'“”‘’]{1,20})[\"'“”‘’]", user_prompt)
+    if kw_match:
+        keyword = kw_match.group(1).strip()
+        if keyword:
+            return keyword
+    return None
+
+
+def rule_based_plan_parse(user_prompt: str) -> dict[str, str | None]:
+    """
+    빠르게 파싱할 수 있는 요소(날짜/키워드)는 룰 기반으로 먼저 추출.
+    - 명확한 날짜 범위가 보이면 바로 사용
+    - 애매한 표현은 LLM 파서가 보완
+    """
+    keyword = _extract_keyword_from_prompt(user_prompt)
+
+    # 1) "2025년 10월부터 11월까지" 처럼 월 범위
+    month_range = re.search(
+        r"(?P<start_year>\d{4})년\s*(?P<start_month>\d{1,2})월\s*(?:부터|~|-|–)?\s*(?:(?P<end_year>\d{4})년\s*)?(?P<end_month>\d{1,2})월",
+        user_prompt,
+    )
+    if month_range:
+        start_year = int(month_range.group("start_year"))
+        start_month = int(month_range.group("start_month"))
+        end_year = int(month_range.group("end_year") or start_year)
+        end_month = int(month_range.group("end_month"))
+        return {
+            "start_date": _format_date(start_year, start_month),
+            "end_date": _format_date(end_year, end_month, month_end=True),
+            "keyword": keyword,
+        }
+
+    # 2) 2025-10-01 ~ 2025-11-30 같은 날짜 범위
+    date_range = re.search(
+        r"(?P<start_year>\d{4})[./-](?P<start_month>\d{1,2})[./-](?P<start_day>\d{1,2})\s*(?:부터|~|-|–|to)\s*(?:(?P<end_year>\d{4})[./-])?(?P<end_month>\d{1,2})[./-](?P<end_day>\d{1,2})",
+        user_prompt,
+    )
+    if date_range:
+        start_year = int(date_range.group("start_year"))
+        start_month = int(date_range.group("start_month"))
+        start_day = int(date_range.group("start_day"))
+        end_year = int(date_range.group("end_year") or start_year)
+        end_month = int(date_range.group("end_month"))
+        end_day = int(date_range.group("end_day"))
+        return {
+            "start_date": _format_date(start_year, start_month, start_day),
+            "end_date": _format_date(end_year, end_month, end_day),
+            "keyword": keyword,
+        }
+
+    # 3) 단일 날짜나 월만 지정된 경우 → 월 전체 범위로 간주
+    single_date = re.search(
+        r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월(?:\s*(?P<day>\d{1,2})일)?",
+        user_prompt,
+    )
+    if not single_date:
+        single_date = re.search(
+            r"(?P<year>\d{4})[./-](?P<month>\d{1,2})(?:[./-](?P<day>\d{1,2}))?",
+            user_prompt,
+        )
+
+    if single_date:
+        year = int(single_date.group("year"))
+        month = int(single_date.group("month"))
+        day_str = single_date.group("day")
+        if day_str:
+            day = int(day_str)
+            start_date = _format_date(year, month, day)
+            end_date = _format_date(year, month, day)
+        else:
+            start_date = _format_date(year, month)
+            end_date = _format_date(year, month, month_end=True)
+        return {
+            "start_date": start_date,
+            "end_date": end_date,
+            "keyword": keyword,
+        }
+
+    return {
+        "start_date": None,
+        "end_date": None,
+        "keyword": keyword,
+    }
+
+
+def save_plan_parse_log(user_prompt: str, raw_response: str, parsed: PlanGenerateRequest, rule_hints: dict[str, str | None]):
+    """
+    파서 결과를 /data/outputs 쪽에 남겨 운영 시 추적 가능하게.
+    """
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = Path(OUTPUT_ROOT) / f"plan_parse_log_{ts}.json"
+        payload = {
+            "user_prompt": user_prompt,
+            "rule_hints": rule_hints,
+            "llm_raw": raw_response,
+            "parsed": parsed.dict(),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+    except Exception:
+        return None
+
+
+async def parse_plan_request_with_llm(user_prompt: str) -> tuple[PlanGenerateRequest, str]:
+    parser_prompt = f"""
+너는 사용자의 요청 문장을 PlanGenerateRequest JSON으로 변환하는 파서다.
+반드시 아래 JSON 스키마의 키만 사용해서 JSON만 출력해라(설명 금지).
+
+스키마 키:
+topic, keyword, start_date, end_date, mode, output_format, extra_instruction
+
+규칙:
+- 날짜는 YYYY-MM-DD 형식으로.
+- 날짜가 없으면 start_date/end_date는 null.
+- topic은 기획서 제목/주제로 가장 적절한 짧은 문장.
+- keyword는 대표 키워드 1개(없으면 null).
+- extra_instruction에는 강조점/톤/제외요소 등 추가 지시를 넣어라.
+- mode는 outline/summary 중 하나(없으면 outline).
+- output_format은 md/txt 중 하나(없으면 md).
+
+사용자 요청:
+\"\"\"{user_prompt}\"\"\"
+""".strip()
+
+    raw = await call_llm(parser_prompt)
+    js = extract_json_block(raw)
+
+    try:
+        data = json.loads(js)
+    except json.JSONDecodeError:
+        data = {}
+
+    data.setdefault("mode", "outline")
+    data.setdefault("output_format", "md")
+
+    try:
+        return PlanGenerateRequest(**data), raw
+    except ValidationError:
+        return PlanGenerateRequest(
+            topic="일기 기반 단편소설 기획서",
+            extra_instruction=user_prompt,
+        ), raw
+
+
+async def parse_plan_request(user_prompt: str) -> PlanGenerateRequest:
+    """
+    1) 룰 기반으로 명확한 날짜/키워드 먼저 잡기
+    2) 나머지는 LLM 파서에게 JSON 스키마로 강제
+    3) 로그를 남겨 운영 중 파서 품질 추적
+    """
+    rule_hints = rule_based_plan_parse(user_prompt)
+    raw_response = ""
+
+    try:
+        parsed, raw_response = await parse_plan_request_with_llm(user_prompt)
+    except Exception:
+        parsed = PlanGenerateRequest(
+            topic="일기 기반 단편소설 기획서",
+            extra_instruction=user_prompt,
+        )
+
+    # 룰 기반 결과가 있으면 우선 적용 (LLM이 애매하게 잡는 경우 덮어쓰기)
+    updates = {k: v for k, v in rule_hints.items() if v}
+    if updates:
+        parsed = parsed.copy(update=updates)
+
+    save_plan_parse_log(user_prompt, raw_response, parsed, rule_hints)
+    return parsed
 
 
 # =========================
@@ -339,9 +534,10 @@ def build_plan_prompt(topic: str, diary_summary: str, extra_instruction: str | N
 - 소설 속 상징적 장치로의 변환 제안
 
 # 7. 작품 톤 & 문체 제안(Style Recommendation)
+- 아래는 '선택사항'이며, 반드시 일기 기반 근거를 먼저 제시한 뒤에만 제안하라.
+- 추천 작가/문체는 1~2개만 제시하라.
 - 이 단편에 어울리는 문장 스타일
 - 느린/빠른/서정적/압축적 등 문체 가이드
-- 참고하면 좋은 작가 스타일(예: 마르케스, 무라카미, 김애란 등)
 
 # 8. 독자 경험 설계(Reader Experience)
 - 독자가 느낄 감정 여정
@@ -363,9 +559,21 @@ def build_plan_prompt(topic: str, diary_summary: str, extra_instruction: str | N
 - 일기 속 상처·믿음·감정은 신중하게 다루고,
   희망의 방향성도 잃지 않도록.
 - 스토리는 실현 가능한 구체적 형태로 제안.
-
 --------------------------------------
+--------------------------------------
+[근거 기반 작성 — 반드시 지킬 것]
+--------------------------------------
+- 이 기획서는 '사용자의 실제 기록'에 근거해야 한다.
+- 각 섹션마다 아래 형식의 '근거'를 최소 2개 이상 포함하라.
+- 근거는 반드시 [일기 날짜/파일명] 또는 [요약에서 나온 원문 표현]을 인용해라.
+- 인용은 과장하지 말고, 요약에 실제로 존재하는 내용만 사용하라.
 
+[근거 표기 형식]
+- 근거: (YYYY-MM-DD) "<요약에서 나온 핵심 문장/키워드>" → 왜 이 근거가 섹션을 뒷받침하는지 1문장 설명
+
+[금지]
+- 근거 없이 일반론으로만 쓰는 문장(예: '누구나 성장한다', '감동을 준다')은 금지한다.
+- 근거가 빈약하면 '근거가 부족함'을 명시하고, 어떤 정보가 더 필요하다고 제안하라.
 
 추가 참고 지시사항(있으면 반영, 없으면 무시 가능):
 {extra}
@@ -421,6 +629,17 @@ async def generate_plan_from_diaries(req: PlanGenerateRequest):
     그걸 다시 LLM에 넘겨서 기획서를 만든 뒤 파일로 저장합니다.
     """
     return await generate_plan_internal(req)
+
+
+@app.post("/api/plan/from-prompt", response_model=PlanGenerateResponse)
+async def plan_from_prompt(body: PlanGeneratePromptOnlyRequest):
+    """
+    Open WebUI에서 자연어 한 줄(prompt)만 보내도
+    - 날짜/키워드/형식 등을 자동 추출한 뒤
+    - 기존 기획서 생성 로직을 그대로 사용.
+    """
+    parsed_req = await parse_plan_request(body.prompt)
+    return await generate_plan_internal(parsed_req)
 
 
 @app.post("/api/diary/preview", response_model=DiaryFormatResponse)
@@ -577,7 +796,11 @@ async def generate_plan_internal(req: PlanGenerateRequest) -> PlanGenerateRespon
         start_date=req.start_date or None,
         end_date=req.end_date or None,
         mode=req.mode or "outline",
+        topic=topic,
+        extra_instruction=req.extra_instruction or None,
     )
+
+    sources = extract_sources_from_summary(diary_summary)
 
     prompt = build_plan_prompt(
         topic=topic,
@@ -593,6 +816,7 @@ async def generate_plan_internal(req: PlanGenerateRequest) -> PlanGenerateRespon
         title=topic,
         content=plan_text,
         file_path=file_path,
+        sources=sources,
     )
 
 

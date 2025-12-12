@@ -314,6 +314,8 @@ class SummarizeRequest(BaseModel):
     start_date: Optional[str] = None  # "YYYY-MM-DD"
     end_date: Optional[str] = None    # "YYYY-MM-DD"
     mode: str = "summary"             # "summary" or "outline"
+    topic: Optional[str] = None       # 기획서 초점
+    extra_instruction: Optional[str] = None  # 추가 지시
 
 
 def filter_by_date(entries: List[DiaryEntry],
@@ -349,6 +351,68 @@ def filter_by_date(entries: List[DiaryEntry],
     return result
 
 
+def build_structured_summary_prompt(diaries_text: str,
+                                    mode: str = "summary",
+                                    topic: Optional[str] = None,
+                                    extra_instruction: Optional[str] = None) -> str:
+    focus = topic.strip() if topic else "전체 일기"
+    extra = extra_instruction.strip() if extra_instruction else ""
+
+    topic_block = f"- 기획서 주제 우선순위: {focus}"
+    extra_block = f"- 추가 지시 반영: {extra}" if extra else ""
+
+    return f"""
+너는 일기 데이터 기반 '소설 기획서용 분석 요약'을 만드는 분석가다.
+반드시 아래 섹션 헤더와 순서를 정확히 지켜 출력하며, 앞뒤 설명/인사말을 덧붙이지 마라.
+원문에 없는 사실/이름/사건을 창작하지 말고, 근거 없는 일반론(희망/감동/성장 등)도 금지한다.
+
+요약 시 고려:
+- 핵심 초점: {focus}
+{extra_block}
+- 애매한 표현은 피하고 날짜/키워드를 명시적으로 적어라.
+- 동일한 섹션 헤더를 정확히 사용하라.
+
+[기간 요약]
+- 선택된 기간/필터에 해당하는 일기의 전반 흐름을 2~3문장으로 압축
+- {focus}와 연관된 흐름을 우선 서술
+
+[반복 키워드 TOP 10]
+- 형식: "- 키워드: N회"
+- 빈도 높은 키워드 상위 10개 (적더라도 가능한 만큼)
+
+[주요 장면 후보]
+- 최소 5개, 최대 10개
+- 형식: "- YYYY-MM-DD: 장면 한 줄 요약 (장면성 있는 사건만)"
+- {focus} 또는 추가 지시와 연관된 장면을 우선 배치
+
+[인물/관계]
+- 반복 등장 인물/관계와 그 성격을 나열
+- 형식 예: "- 인물/관계: 성격/역할 (근거 포함)"
+
+[감정 변화 흐름]
+- 초반/중반/후반 감정 흐름을 각 1~2문장
+- 근거를 날짜/사건과 함께 언급
+
+[원문 표현(발췌)]
+- 최대 5개, 최소 1개
+- 형식: "- YYYY-MM-DD: \"원문 표현\""
+- 원문에 존재하는 문장/구절만 발췌, 단어 추가/창작 금지
+
+[기획서에 바로 쓸 근거 목록(JSON)]
+- 바로 아래 줄부터는 코드블록 없이 순수 JSON 배열만 출력한다.
+- 가능하면 10~20개 사이의 근거를 담아라.
+- 각 아이템에는 date, title, excerpt, reason 키가 모두 있어야 하며 type 기본값은 "diary"다.
+- excerpt는 원문에 실제로 존재하는 표현만 사용하고 창작을 금지한다.
+- JSON 배열 외의 불릿/설명/마크다운은 절대 추가하지 마라.
+
+아래는 선택된 일기 데이터다. 반드시 위 형식을 따르라.
+
+[일기 시작]
+{diaries_text}
+[일기 끝]
+""".strip()
+
+
 @app.post("/summarize")
 async def summarize(req: SummarizeRequest):
     entries = await load_diary_entries()
@@ -376,29 +440,12 @@ async def summarize(req: SummarizeRequest):
 
     diaries_text = "\n\n".join(chunks)
 
-    if req.mode == "outline":
-        system_instruction = """
-당신은 작가의 보조자입니다.
-아래 일기를 바탕으로 소설 기획안을 만드세요.
-
-요구사항:
-- 3막 구조 또는 명확한 서사 구조로 정리.
-- 등장인물, 갈등, 클라이맥스, 결말을 정리.
-- 표가 필요하면 Markdown 표 형식으로 작성.
-"""
-    else:
-        system_instruction = """
-당신은 심리/서사 분석가입니다.
-아래 일기를 바탕으로 주요 사건, 감정 변화, 반복되는 주제를 요약하세요.
-표가 필요하면 Markdown 형식으로 작성.
-"""
-
-    prompt = f"""{system_instruction}
-
-[일기 시작]
-{diaries_text}
-[일기 끝]
-"""
+    prompt = build_structured_summary_prompt(
+        diaries_text=diaries_text,
+        mode=req.mode,
+        topic=req.topic,
+        extra_instruction=req.extra_instruction,
+    )
 
     result = await call_llm(prompt)
     return {"result": result}
