@@ -3,3 +3,7 @@ uvicorn[standard]
 jinja2
 python-multipart
 httpx
+beautifulsoup4
+feedparser
+trafilatura
+readability-lxml

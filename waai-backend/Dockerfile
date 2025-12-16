@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py mcp_client.py ./
+COPY utils ./utils
 COPY templates ./templates
 COPY static ./static
 

@@ -12,15 +12,15 @@ import psutil  # requirements.txt 에 추가 필요
 # 헬스체크 대상 URL
 # -----------------------
 BACKEND_HEALTH = os.getenv("BACKEND_HEALTH", "http://waai-backend:8000/health")
-MCP_HEALTH = os.getenv("MCP_HEALTH", "http://mcp-diary:7002/health")
+MCP_HEALTH = os.getenv("MCP_HEALTH", "http://mcp-bridge:7002/health")
 MCP_FS_HEALTH = os.getenv("MCP_FS_HEALTH", "http://mcp-filesystem:7001/health")
-DIARY_BOT_HEALTH = os.getenv("DIARY_BOT_HEALTH", "http://diary-format-bot:8001/health")
+DIARY_BOT_HEALTH = os.getenv("DIARY_BOT_HEALTH", "http://data-format-bot:8001/health")
 
 HEALTH_TARGETS = [
     ("waai-backend", BACKEND_HEALTH),
-    ("mcp-diary", MCP_HEALTH),
+    ("mcp-bridge", MCP_HEALTH),
     ("mcp-filesystem", MCP_FS_HEALTH),
-    ("diary-format-bot", DIARY_BOT_HEALTH),
+    ("data-format-bot", DIARY_BOT_HEALTH),
 ]
 
 # -----------------------
@@ -32,7 +32,7 @@ INTERVAL = int(os.getenv("INTERVAL", "60"))  # 초
 CPU_THRESHOLD = float(os.getenv("CPU_THRESHOLD", "80"))
 GPU_THRESHOLD = float(os.getenv("GPU_THRESHOLD", "80"))
 
-# md 파일 위치 (diary-format-bot 이 만들어주는 경로와 동일하게 마운트)
+# md 파일 위치 (data-format-bot 이 만들어주는 경로와 동일하게 마운트)
 DIARY_DIR = Path(os.getenv("DIARY_DIR", "/waai/data/diary"))
 
 # 로그 파일로도 남기고 싶으면 경로 설정 (없으면 콘솔만)
@@ -235,7 +235,7 @@ def main():
         try:
             log("=" * 30 + " 주기 모니터링 시작 " + "=" * 30, level="INFO")
 
-            # 1) 헬스체크 (backend / mcp-diary / diary-format-bot 각각)
+            # 1) 헬스체크 (backend / mcp-bridge / data-format-bot 각각)
             check_all_health()
 
             # 2) CPU / GPU 사용률 체크

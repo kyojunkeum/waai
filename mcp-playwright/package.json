@@ -1,0 +1,14 @@
+{
+  "name": "mcp-playwright",
+  "version": "0.1.0",
+  "description": "Playwright-based crawler service for MCP",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "express": "^4.19.2",
+    "playwright": "1.45.0"
+  }
+}

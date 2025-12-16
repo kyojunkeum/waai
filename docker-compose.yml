@@ -26,17 +26,29 @@ services:
     container_name: mcp-filesystem
     environment:
       DIARY_ROOT: "/data/diary"
+      IDEAS_ROOT: "/data/ideas"
+      WEB_RESEARCH_ROOT: "/data/web_research"
+      WORKS_ROOT: "/data/works"
+      BIBLE_ROOT: "/data/bible"
     volumes:
       - ./data/diary:/data/diary
+      - ./data/ideas:/data/ideas
+      - ./data/web_research:/data/web_research
+      - ./data/works:/data/works
+      - ./data/bible:/data/bible
     networks:
       - waai-net
     restart: unless-stopped
 
-  mcp-diary:
-    build: ./mcp-diary
-    container_name: mcp-diary
+  mcp-bridge:
+    build: ./mcp-bridge
+    container_name: mcp-bridge
     environment:
       DIARY_ROOT: "/data/diary"
+      IDEAS_ROOT: "/data/ideas"
+      WEB_RESEARCH_ROOT: "/data/web_research"
+      WORKS_ROOT: "/data/works"
+      BIBLE_ROOT: "/data/bible"
       LLM_BACKEND: "ollama"
       OLLAMA_URL: "http://ollama:11434"
       MODEL_NAME: "qwen2:7b"
@@ -48,14 +60,30 @@ services:
 
     volumes:
       - ./data/diary:/data/diary
+      - ./data/ideas:/data/ideas
+      - ./data/web_research:/data/web_research
+      - ./data/works:/data/works
+      - ./data/bible:/data/bible
     depends_on:
       - ollama
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://mcp-diary:7002/health"]
+      test: ["CMD", "curl", "-f", "http://mcp-bridge:7002/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+    networks:
+      - waai-net
+    restart: unless-stopped
+
+  mcp-playwright:
+    build: ./mcp-playwright
+    container_name: mcp-playwright
+    environment:
+      - OUTPUT_DIR=/home/witness/memory/webresearch
+      - HEADLESS=1
+    volumes:
+      - /home/witness/memory/webresearch:/home/witness/memory/webresearch
     networks:
       - waai-net
     restart: unless-stopped
@@ -70,14 +98,30 @@ services:
       #MODEL_NAME: "llama3.1"
       MODEL_NAME: "qwen2:7b"
       OUTPUT_ROOT: "/data/outputs"
+      CRITIQUE_OBJECTS_ROOT: "/data/critique/objects"
+      CRITIQUE_RESULTS_ROOT: "/data/critique/results"
+      CRITIQUE_CRITERIA_PATH: "/data/critique/criteria/합평기준규칙.md"
       DIARY_ROOT: "/data/diary"
+      IDEAS_ROOT: "/data/ideas"
+      WEB_RESEARCH_ROOT: "/data/web_research"
+      WEBRESEARCH_OUT_DIR: "/memory/webresearch"
+      WORKS_ROOT: "/data/works"
+      BIBLE_ROOT: "/data/bible"
+      PLAYWRIGHT_MCP_URL: "http://mcp-playwright:7003"
     volumes:
       - ./data/outputs:/data/outputs
       - ./data/diary:/data/diary
+      - ./data/ideas:/data/ideas
+      - ./data/web_research:/data/web_research
+      - ./data/works:/data/works
+      - ./data/bible:/data/bible
+      - ./data/critique:/data/critique
+      - /home/witness/memory/webresearch:/memory/webresearch
     depends_on:
       - ollama
       - mcp-filesystem
-      - mcp-diary
+      - mcp-bridge
+      - mcp-playwright
     healthcheck:
       test: ["CMD", "curl", "-f", "http://waai-backend:8000/health"]
       interval: 30s
@@ -88,15 +132,20 @@ services:
       - waai-net
     restart: unless-stopped
 
-  diary-format-bot:
-    build: ./diary-format-bot
-    container_name: diary-format-bot
+  data-format-bot:
+    build: ./data-format-bot
+    container_name: data-format-bot
     environment:
       - LLM_API_URL=http://waai-backend:8000/api/diary/format
+      - DATA_REFORMAT_URL=http://waai-backend:8000/api/data/reformat-md
+      - MULTI_BASE_INPUT=/home/witness/memory
+      - MULTI_BASE_OUTPUT=/home/witness/waai/data
       - IGNORE_PROCESSED=true
     volumes:
       - /home/witness/memory/diary:/input
       - ./data/diary:/output
+      - /home/witness/memory:/home/witness/memory
+      - ./data:/home/witness/waai/data
     depends_on:
       - waai-backend
     networks:
@@ -115,9 +164,9 @@ services:
               capabilities: ["gpu"]
     environment:
       - TARGET_URL=http://waai-backend:8000/health
-      - MCP_HEALTH=http://mcp-diary:7002/health
+      - MCP_HEALTH=http://mcp-bridge:7002/health
       - MCP_FS_HEALTH=http://mcp-filesystem:7001/health
-      - DIARY_BOT_HEALTH=http://diary-format-bot:8001/health
+      - DIARY_BOT_HEALTH=http://data-format-bot:8001/health
       - INTERVAL=60
       - CPU_THRESHOLD=80
       - GPU_THRESHOLD=80

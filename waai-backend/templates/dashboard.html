@@ -14,9 +14,6 @@
         사용자: {{ user }}
       </div>
     </div>
-    <nav>
-      <a href="/">기획 생성 화면</a>
-    </nav>
   </header>
 
   <div class="card">
@@ -25,27 +22,20 @@
   </div>
 
   <div class="card">
-    <h2>프로젝트 타임라인 요약</h2>
-    <div id="projects">
-      {% for p in projects %}
-        <div style="margin-bottom: 16px;">
-          <h3>{{ p }}</h3>
-          {% set items = project_data.get(p, []) %}
-          {% if items %}
-            <p>총 {{ items|length }}개 일기</p>
+    <h2>/data 파일 목록</h2>
+    <div id="data-roots">
+      {% for name, root in data_roots.items() %}
+        <div style="margin-bottom: 18px;">
+          <h3>{{ name }} <span style="font-weight: normal; color: #888;">({{ root }})</span></h3>
+          {% set files = data_files.get(name, []) %}
+          {% if files %}
             <ul>
-              {% for item in items[:10] %}
-                <li>
-                  {{ item.date }} - {{ item.title or item.rel_path }}
-                  (mood_score: {{ item.mood_score }})
-                </li>
+              {% for f in files %}
+                <li>{{ f.rel_path }}{% if f.size_kb is not none %} <span style="color:#888;">- {{ f.size_kb }}KB</span>{% endif %} <span style="color:#aaa;">{{ f.mtime }}</span></li>
               {% endfor %}
             </ul>
-            {% if items|length > 10 %}
-              <p>... 외 {{ items|length - 10 }}개</p>
-            {% endif %}
           {% else %}
-            <p>데이터 없음</p>
+            <p>파일 없음</p>
           {% endif %}
         </div>
       {% endfor %}
@@ -102,5 +92,6 @@
       }
     });
   </script>
+
 </body>
 </html>

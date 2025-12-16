@@ -16,10 +16,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 앱 코드 복사
-COPY diary_mcp.py .
+COPY bridge_mcp.py .
 
 # FastAPI 서버 실행 (포트 7002)
 EXPOSE 7002
 
 # uvicorn 실행
-CMD ["uvicorn", "diary_mcp:app", "--host", "0.0.0.0", "--port", "7002"]
+CMD ["uvicorn", "bridge_mcp:app", "--host", "0.0.0.0", "--port", "7002"]

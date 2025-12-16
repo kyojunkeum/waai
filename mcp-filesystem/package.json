@@ -4,6 +4,7 @@
   "main": "index.js",
   "type": "module",
   "dependencies": {
-    "express": "^4.19.0"
+    "express": "^4.19.0",
+    "yaml": "^2.4.5"
   }
 }
