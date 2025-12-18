@@ -35,11 +35,20 @@ GPU_THRESHOLD = float(os.getenv("GPU_THRESHOLD", "80"))
 # md 파일 위치 (data-format-bot 이 만들어주는 경로와 동일하게 마운트)
 DIARY_DIR = Path(os.getenv("DIARY_DIR", "/waai/data/diary"))
 
+# 합평 원고 인입 디렉터리 (새 파일 생성 시 /api/critique 호출)
+CRITIQUE_INBOX_DIR = Path(os.getenv("CRITIQUE_INBOX_DIR", "/home/witness/waai/data/objects"))
+CRITIQUE_PROCESSED_DIR = Path(os.getenv("CRITIQUE_PROCESSED_DIR", "/waai/data/critique/processed"))
+CRITIQUE_API_URL = os.getenv("CRITIQUE_API_URL", "http://waai-backend:8000/api/critique")
+CRITIQUE_EXTENSIONS = {".txt", ".md"}
+CRITIQUE_CHUNK_AUTO_CHARS = int(os.getenv("CRITIQUE_CHUNK_AUTO_CHARS", "12000"))
+
 # 로그 파일로도 남기고 싶으면 경로 설정 (없으면 콘솔만)
 LOG_FILE = os.getenv("MONITOR_LOG_FILE", "")
 
 # 이미 감지한 md 파일 목록 (신규 생성 감지용)
 known_md_files: set[str] = set()
+known_critique_files: set[str] = set()
+critique_failures: dict[str, int] = {}
 
 
 # -----------------------
@@ -213,6 +222,151 @@ def check_new_md_files():
 
 
 # -----------------------
+# 4. 신규 합평 원고 파일 감지 -> /api/critique 호출
+# -----------------------
+def init_known_critique_files():
+    if not CRITIQUE_INBOX_DIR.exists():
+        log(
+            f"CRITIQUE_INBOX_DIR {CRITIQUE_INBOX_DIR} 가 존재하지 않습니다. 볼륨 마운트를 확인하세요.",
+            level="WARN",
+        )
+        return
+
+    for p in CRITIQUE_INBOX_DIR.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() in CRITIQUE_EXTENSIONS:
+            known_critique_files.add(p.name)
+
+    log(f"초기 합평 원고 파일 개수: {len(known_critique_files)}개", level="INFO")
+
+
+def _read_text_when_stable(path: Path, retries: int = 4, delay: float = 0.5) -> str:
+    last_size = -1
+    for _ in range(retries):
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            time.sleep(delay)
+            continue
+        if size == last_size:
+            return path.read_text(encoding="utf-8", errors="ignore")
+        last_size = size
+        time.sleep(delay)
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            header = "\n".join(lines[1:idx])
+            body = "\n".join(lines[idx + 1:]).lstrip()
+            meta: dict[str, str] = {}
+            for line in header.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    meta[key] = value
+            return meta, body
+    return {}, text
+
+
+def _build_critique_payload(path: Path, raw_text: str) -> dict[str, object] | None:
+    fallback_title = path.stem
+    meta, body = _parse_frontmatter(raw_text)
+    if (meta.get("type") or "").strip().lower() == "objects":
+        return None
+    title = meta.get("title") or fallback_title
+    content = (body or "").strip()
+    if not content:
+        return None
+    payload: dict[str, object] = {"title": title, "content": content}
+    if len(content) >= CRITIQUE_CHUNK_AUTO_CHARS:
+        payload["options"] = {"chunked_critique": True}
+    return payload
+
+
+def _post_critique_request(payload: dict[str, str], source_name: str) -> bool:
+    try:
+        r = httpx.post(CRITIQUE_API_URL, json=payload, timeout=120.0)
+    except Exception as e:
+        log(f"[CRITIQUE] API 호출 실패 ({source_name}): {e}", level="ERROR")
+        return False
+
+    if r.status_code != 200:
+        log(
+            f"[CRITIQUE] API 오류 ({source_name}): status={r.status_code}, detail={r.text}",
+            level="ERROR",
+        )
+        return False
+
+    try:
+        data = r.json()
+    except Exception:
+        log(f"[CRITIQUE] API 응답 파싱 실패 ({source_name})", level="WARN")
+        return True
+
+    critique_path = data.get("data", {}).get("critique_file_path")
+    log(f"[CRITIQUE] 합평 완료 ({source_name}) -> {critique_path}", level="INFO")
+    return True
+
+
+def _move_to_processed(path: Path) -> None:
+    try:
+        CRITIQUE_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        dest = CRITIQUE_PROCESSED_DIR / path.name
+        if dest.exists():
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = CRITIQUE_PROCESSED_DIR / f"{path.stem}_{stamp}{path.suffix}"
+        path.replace(dest)
+        log(f"[CRITIQUE] 원고 이동 완료 -> {dest}", level="INFO")
+    except Exception as e:
+        log(f"[CRITIQUE] 원고 이동 실패 ({path.name}): {e}", level="WARN")
+
+
+def check_new_critique_files():
+    if not CRITIQUE_INBOX_DIR.exists():
+        return
+
+    current_files = set()
+    for p in CRITIQUE_INBOX_DIR.iterdir():
+        if not p.is_file():
+            continue
+        if p.name.startswith("."):
+            continue
+        if p.suffix.lower() in CRITIQUE_EXTENSIONS:
+            current_files.add(p.name)
+
+    new_files = current_files - known_critique_files
+    for fname in sorted(new_files):
+        path = CRITIQUE_INBOX_DIR / fname
+        raw_text = _read_text_when_stable(path)
+        payload = _build_critique_payload(path, raw_text)
+        if not payload:
+            log(f"[CRITIQUE] 합평 대상 제외 또는 본문 없음: {fname}", level="WARN")
+            known_critique_files.add(fname)
+            continue
+
+        ok = _post_critique_request(payload, fname)
+        if ok:
+            known_critique_files.add(fname)
+            critique_failures.pop(fname, None)
+            _move_to_processed(path)
+        else:
+            critique_failures[fname] = critique_failures.get(fname, 0) + 1
+            log(
+                f"[CRITIQUE] 재시도 대기 ({fname}) 실패 횟수={critique_failures[fname]}",
+                level="WARN",
+            )
+
+
+# -----------------------
 # 메인 루프
 # -----------------------
 def main():
@@ -230,6 +384,7 @@ def main():
     )
 
     init_known_md_files()
+    init_known_critique_files()
 
     while True:
         try:
@@ -244,6 +399,9 @@ def main():
 
             # 3) 신규 md 파일 생성 감지 (txt→md 포맷팅 완료 알림)
             check_new_md_files()
+
+            # 4) 신규 합평 원고 파일 감지 -> /api/critique 호출
+            check_new_critique_files()
 
         except Exception as e:
             # 모니터 자체에서 잡히지 않은 예외가 터지면 여기서 최종 알림

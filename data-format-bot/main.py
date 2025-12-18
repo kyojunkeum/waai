@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import json
 import time
@@ -5,10 +6,10 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import re
+import uuid
 import threading
 import http.server
 import socketserver
-
 import requests
 import yaml
 
@@ -40,8 +41,8 @@ def update_state_on_error(err: Exception):
     STATE["last_error"] = str(err)
 
 
-DIARY_INPUT_DIR = Path("/input")
-DIARY_OUTPUT_DIR = Path("/output")
+DIARY_INPUT_DIR = Path(os.getenv("DIARY_INPUT_DIR", "/home/witness/memory/diary"))
+DIARY_OUTPUT_DIR = Path("/home/witness/waai/data/diary")
 DIARY_PROCESSED_DIR = DIARY_INPUT_DIR / "_processed"
 DIARY_PROCESSED_RECORD = DIARY_INPUT_DIR / ".processed_files.json"
 
@@ -73,7 +74,6 @@ TYPE_CONFIGS = {
     },
 }
 
-LLM_API_URL = os.getenv("LLM_API_URL", "http://waai-backend:8000/api/diary/format")
 LLM_FIX_URL = os.getenv("LLM_FIX_URL", "http://waai-backend:8000/api/diary/reformat-md")
 DATA_REFORMAT_URL = os.getenv("DATA_REFORMAT_URL", "http://waai-backend:8000/api/data/reformat-md")
 
@@ -132,45 +132,41 @@ def save_processed_records(record_path: Path, processed_set):
 def parse_metadata_from_filename(file_path: Path):
     """
     예: 2025-12-09_23-15_tags1-tags2.txt
+    방어:
+    - date가 YYYY-MM-DD 아니면 오늘 날짜로 fallback
+    - time이 HH-MM or HH:MM 아니면 00:00 fallback
+    - title이 없으면 stem 전체 사용
     """
     name = file_path.stem
     parts = name.split("_", 3)
-    date = parts[0] if len(parts) > 0 else ""
-    time_str = parts[1] if len(parts) > 1 else "00-00"
+
+    date_raw = parts[0] if len(parts) > 0 else ""
+    time_raw = parts[1] if len(parts) > 1 else ""
     title_raw = parts[2] if len(parts) > 2 else name
 
-    time_formatted = time_str.replace("-", ":")  # 23-15 -> 23:15
-    title = title_raw.replace("-", " ")
+    # date 검증
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_raw):
+        date = date_raw
+    else:
+        date = datetime.now().strftime("%Y-%m-%d")
+
+    # time 정규화: "23-15" / "23:15" / "2315" 일부 허용
+    time_formatted = "00:00"
+    if time_raw:
+        t = time_raw.replace("-", ":")
+        if re.fullmatch(r"\d{2}:\d{2}", t):
+            hh, mm = t.split(":")
+            if 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59:
+                time_formatted = f"{hh}:{mm}"
+        elif re.fullmatch(r"\d{4}", time_raw):
+            hh, mm = time_raw[:2], time_raw[2:]
+            if 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59:
+                time_formatted = f"{hh}:{mm}"
+
+    # title 정리
+    title = (title_raw or name).replace("-", " ").strip() or "diary"
 
     return date, time_formatted, title
-
-
-def call_llm_for_format(date: str, time_str: str, title: str, raw_text: str) -> str:
-    """
-    waai-backend 의 /api/diary/format 호출.
-    """
-    payload = {
-        "date": date,
-        "time": time_str,
-        "title": title,
-        "raw_text": raw_text,
-    }
-    resp = requests.post(LLM_API_URL, json=payload, timeout=180)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["result"]  # DiaryFormatResponse.result
-
-
-def call_llm_for_metadata_fix(md_text: str) -> str:
-    """
-    이미 생성된 md 텍스트를 /api/diary/fix-metadata 로 보내
-    메타데이터(tags, projects 등)를 보정하는 함수
-    """
-    payload = {"markdown": md_text}
-    resp = requests.post(LLM_FIX_URL, json=payload, timeout=180)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["result"]
 
 
 def extract_tags_from_md(md_text: str):
@@ -206,32 +202,46 @@ def slugify(text: str) -> str:
     return text or "note"
 
 
-def make_output_filename(date: str, md_text: str) -> str:
+def _format_date_for_filename(date: str) -> str:
+    digits = date.replace("-", "")
+    if len(digits) == 8 and digits.isdigit():
+        return digits
+    return datetime.now().strftime("%Y%m%d")
+
+
+def _format_time_for_filename(time_str: str) -> str:
+    digits = time_str.replace(":", "")
+    if len(digits) == 4 and digits.isdigit():
+        return digits
+    return datetime.now().strftime("%H%M")
+
+
+def make_output_filename(date: str, time_str: str, original_name: str) -> str:
     """
-    tags 에서 subject1-subject2 를 만드는 로직.
-    - tags가 2개 이상: 첫 두 개
-    - 1개: 하나 + 'diary'
-    - 0개: 'diary-note'
+    YYYYMMDD-HHMM-원본파일명_UUID.md 형식으로 저장.
     """
-    tags = extract_tags_from_md(md_text)
-
-    if len(tags) >= 2:
-        subj1, subj2 = tags[0], tags[1]
-    elif len(tags) == 1:
-        subj1, subj2 = tags[0], "diary"
-    else:
-        subj1, subj2 = "diary", "note"
-
-    s1 = slugify(subj1)
-    s2 = slugify(subj2)
-
-    return f"{date}_{s1}-{s2}.md"
+    date_part = _format_date_for_filename(date)
+    time_part = _format_time_for_filename(time_str)
+    original_part = slugify(original_name)
+    short_id = uuid.uuid4().hex[:8]
+    return f"{date_part}-{time_part}-{original_part}_{short_id}.md"
 
 
 def make_generic_output_filename(prefix: str, title: str) -> str:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{ts}_{slugify(title or prefix)}.md"
 
+def ensure_unique_path(directory: Path, filename: str) -> Path:
+    """
+    같은 파일명이 이미 있으면 짧은 UUID를 붙여 충돌을 피한다.
+    """
+    base_path = directory / filename
+    if not base_path.exists():
+        return base_path
+
+    stem, suffix = base_path.stem, base_path.suffix
+    short_id = uuid.uuid4().hex[:8]
+    return directory / f"{stem}_{short_id}{suffix}"
 
 # -----------------------------
 # 처리 로직
@@ -294,42 +304,156 @@ def call_llm_for_data_reformat(doc_type: str, md_text: str) -> str:
         raise RuntimeError(data.get("error") or "reformat failed")
     return data["data"]["result"]
 
+def build_draft_md(date: str, time_str: str, title: str, raw_text: str) -> str:
+    raw_text = raw_text.rstrip("\n")
 
+    front_matter = f"""---
+type: diary
+date: {date}
+time: "{time_str}"
+title: "{title}"
+---""".rstrip()
+
+    # 최소 본문 골격: LLM이 섹션을 채우도록 유도
+    body = "\n".join(
+        [
+            "# 오늘 요약",
+            "",
+            "# 오늘의 사건",
+            "",
+            "# 감정 / 생각",
+            "",
+            "# 배운 것 / 통찰",
+            "",
+            "# 소설 아이디어 메모",
+            "",
+            "# TODO / 다음에 이어서 쓸 것",
+        ]
+    ).rstrip()
+
+    # LLM 참고용 원문 (출력 금지)
+    ref = f"""
+<!--
+```text
+{raw_text}
+-->
+""".lstrip()
+    return f"{front_matter}\n\n{body}\n{ref}".rstrip() + "\n"
+
+def strip_raw_text_sections(md: str) -> str:
+    """
+    LLM이 실수로 원문 섹션을 출력했을 때 제거한다.
+    - "원본 텍스트" 섹션
+    - "참고용 원문(출력 금지)" 섹션
+    - 해당 섹션의 ```text ... ``` 블록
+    를 보수적으로 삭제.
+    """
+    text = md
+
+    # 1) "## 원본 텍스트 ..." + 다음 ```text ... ``` 제거
+    text = re.sub(
+        r"\n---\n\s*##\s*원본\s*텍스트[^\n]*\n```text\n.*?\n```\n?",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
+
+    # 2) "## 참고용 원문(출력 금지) ..." + 다음 ```text ... ``` 제거
+    text = re.sub(
+        r"\n---\n\s*##\s*참고용\s*원문[^\n]*\n```text\n.*?\n```\n?",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
+
+    # 3) 헤더만 남고 코드블록이 이어지는 변칙 케이스 방어
+    text = re.sub(
+        r"\n##\s*(원본\s*텍스트|참고용\s*원문)[^\n]*\n```text\n.*?\n```\n?",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
+
+    return text.rstrip() + "\n"
+
+def append_raw_text(final_md: str, raw_text: str) -> str:
+    """
+    최종 md 맨 아래에 raw_text(원본 txt 줄글)만 '그대로' 붙인다.
+    - 이 부분은 LLM이 아니라 시스템이 책임진다.
+    """
+    raw_text = raw_text.rstrip("\n")
+
+    return (
+        final_md.rstrip()
+        + "\n\n---\n\n"
+        + "## 원본 텍스트 (자동 보존 · 수정 금지)\n"
+        + "```text\n"
+        + raw_text
+        + "\n```\n"
+    )
+
+
+def call_llm_for_reformat(md_text: str) -> str:
+    """
+    draft md 텍스트를 백엔드 API로 보내 최종 메타데이터+본문을 생성/보정한다.
+    (raw_text는 md_text에 포함되지 않도록 설계되어 있음)
+    """
+    payload = {"markdown": md_text}
+    resp = requests.post(LLM_FIX_URL, json=payload, timeout=180)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["result"]
+
+    
+  
 def handle_new_file(file_path: Path) -> bool:
+    # 새 텍스트 파일 생성 여부 확인
     if file_path.suffix.lower() != ".txt":
         return False
-
     print(f"[INFO] New file detected: {file_path}")
-    date, time_str, title = parse_metadata_from_filename(file_path)
-    raw_text = file_path.read_text(encoding="utf-8")
 
     try:
-        # 1차: 기본 포맷 (지금 쓰는 /api/diary/format)
-        md_text = call_llm_for_format(date, time_str, title, raw_text)
+        date, time_str, title = parse_metadata_from_filename(file_path)
+        raw_text = file_path.read_text(encoding="utf-8")
 
-        # 2차: 메타데이터 보정 (옵션)
+        # 1차: draft 생성 (최소 메타 + 본문 골격)  ※ 디스크 저장 X
+        draft_md = build_draft_md(date, time_str, title, raw_text)
+
+        # 2차: LLM 호출하여 메타데이터/본문 정제 (raw_text 없음)
         try:
-            md_text = call_llm_for_metadata_fix(md_text)
+            refined_md = call_llm_for_reformat(draft_md)
+            header_yaml = build_initial_yaml("diary", title)
+            refined_md = sanitize_markdown(refined_md, header_yaml)
             print("[INFO] Metadata refined by LLM")
         except Exception as e:
-            print(f"[WARN] 메타데이터 보정 실패, 1차 결과 그대로 사용: {e}")
+            # LLM 실패 시에도 output은 1개만 저장해야 하므로 draft를 대신 사용
+            print(f"[WARN] 메타데이터 보정 실패 → draft를 최종으로 사용: {e}")
+            refined_md = draft_md
+
+        # LLM이 혹시 원문 섹션을 출력했으면 제거
+        refined_md = strip_raw_text_sections(refined_md)
+
+        # 최종 저장 직전에 raw_text를 시스템이 맨 아래에 붙임
+        final_md = append_raw_text(refined_md, raw_text)
+
+        # 저장 (output에는 최종 파일 1개만)
+        out_name = make_output_filename(date, time_str, file_path.stem)
+        out_path = ensure_unique_path(DIARY_OUTPUT_DIR, out_name)
+        out_path.write_text(final_md, encoding="utf-8")
+        print(f"[INFO] Saved formatted diary: {out_path}")
+
+        # 원본 txt 이동
+        processed_path = DIARY_PROCESSED_DIR / file_path.name
+        shutil.move(str(file_path), str(processed_path))
+        print(f"[INFO] Moved original to: {processed_path}")
+
+        update_state_on_success(file_path.name)
+        return True
 
     except Exception as e:
         update_state_on_error(e)
-        print(f"[ERROR] LLM 호출 실패: {e}")
+        print(f"[ERROR] handle_new_file failed: {e}")
         return False
-
-    out_name = make_output_filename(date, md_text)
-    out_path = DIARY_OUTPUT_DIR / out_name
-    out_path.write_text(md_text, encoding="utf-8")
-    print(f"[INFO] Saved formatted diary: {out_path}")
-
-    processed_path = DIARY_PROCESSED_DIR / file_path.name
-    shutil.move(str(file_path), str(processed_path))
-    print(f"[INFO] Moved original to: {processed_path}")
-
-    update_state_on_success(file_path.name)
-    return True
 
 
 def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
@@ -345,13 +469,7 @@ def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
         draft_md = build_initial_md(doc_type, title, raw_text)
         formatted_md = call_llm_for_data_reformat(doc_type, draft_md)
         formatted_md = sanitize_markdown(formatted_md, header_yaml)
-        # LLM 출력과 별개로 원문을 반드시 덧붙여 보존
-        formatted_md = (
-            f"{formatted_md.rstrip()}\n\n"
-            f"---\n"
-            f"## 원본 텍스트 (자동 보존)\n"
-            f"```text\n{raw_text}\n```\n"
-        )
+        formatted_md = strip_raw_text_sections(formatted_md)
     except Exception as e:
         update_state_on_error(e)
         print(f"[ERROR] LLM 호출 실패 ({doc_type}): {e}")
@@ -448,7 +566,8 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A003 (BaseHTTPRequestHandler hook name)
         return
 
-
+class ReuseTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
 def start_health_server():
     with socketserver.TCPServer(("", HEALTH_PORT), HealthHandler) as httpd:
         print(f"[INFO] data-format-bot health server started on port {HEALTH_PORT}")

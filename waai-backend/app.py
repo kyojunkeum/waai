@@ -57,21 +57,23 @@ def _resolve_data_path(env_var: str, default_subpath: str, require_writable: boo
             return path
     return candidates[-1]
 
-DIARY_ROOT = os.environ.get("DIARY_ROOT", "/data/diary")
+DIARY_ROOT = str(_resolve_data_path("DIARY_ROOT", "diary", require_writable=True))
 DIARY_OUTPUT_DIR = Path(DIARY_ROOT)
 DIARY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-IDEAS_ROOT = os.environ.get("IDEAS_ROOT", "/data/ideas")
-WEB_RESEARCH_ROOT = os.environ.get("WEB_RESEARCH_ROOT", "/data/web_research")
+IDEAS_ROOT = str(_resolve_data_path("IDEAS_ROOT", "ideas"))
+WEB_RESEARCH_ROOT = str(_resolve_data_path("WEB_RESEARCH_ROOT", "web_research", require_writable=True))
 WEBRESEARCH_OUT_DIR = os.environ.get("WEBRESEARCH_OUT_DIR", "/memory/webresearch")
-WORKS_ROOT = os.environ.get("WORKS_ROOT", "/data/works")
-BIBLE_ROOT = os.environ.get("BIBLE_ROOT", "/data/bible")
+WORKS_ROOT = str(_resolve_data_path("WORKS_ROOT", "works"))
+BIBLE_ROOT = str(_resolve_data_path("BIBLE_ROOT", "bible"))
 CRITIQUE_OBJECTS_ROOT = _resolve_data_path("CRITIQUE_OBJECTS_ROOT", "critique/objects", require_writable=True)
 CRITIQUE_RESULTS_ROOT = _resolve_data_path("CRITIQUE_RESULTS_ROOT", "critique/results", require_writable=True)
 CRITIQUE_CRITERIA_PATH = _resolve_data_path("CRITIQUE_CRITERIA_PATH", "critique/criteria/합평기준규칙.md")
+CRITIQUE_CHUNK_MAX_CHARS = int(os.environ.get("CRITIQUE_CHUNK_MAX_CHARS", "6000"))
+CRITIQUE_CHUNK_MAX_PARTS = int(os.environ.get("CRITIQUE_CHUNK_MAX_PARTS", "20"))
 
 PLAYWRIGHT_SCHEDULE_PATH = Path(os.environ.get("PLAYWRIGHT_SCHEDULE_PATH", "/data/web_research/playwright_schedule.json"))
-OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "/data/outputs")
+OUTPUT_ROOT = str(_resolve_data_path("OUTPUT_ROOT", "outputs", require_writable=True))
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 Path(WEB_RESEARCH_ROOT).mkdir(parents=True, exist_ok=True)
 ensure_dir(WEBRESEARCH_OUT_DIR)
@@ -212,6 +214,9 @@ class PlaywrightScheduleConfig(BaseModel):
 class CritiqueOptions(BaseModel):
     save_critique: bool = True
     save_work: bool | None = None
+    chunked_critique: bool = False
+    chunk_max_chars: int | None = None
+    max_parts: int | None = None
 
 
 class CritiqueRequest(BaseModel):
@@ -426,6 +431,29 @@ def rule_based_plan_parse(user_prompt: str) -> dict[str, str | None]:
             "keyword": keyword,
         }
 
+    # 2-1) 12월 10일부터 12월 18일까지 같은 '연도 없는' 날짜 범위
+    day_range = re.search(
+        r"(?P<start_month>\d{1,2})월\s*(?P<start_day>\d{1,2})일?\s*(?:부터|~|-|–|to)\s*(?P<end_month>\d{1,2})월\s*(?P<end_day>\d{1,2})일?",
+        user_prompt,
+    )
+    if not day_range:
+        day_range = re.search(
+            r"(?P<start_month>\d{1,2})[./-](?P<start_day>\d{1,2})\s*(?:부터|~|-|–|to)\s*(?P<end_month>\d{1,2})[./-](?P<end_day>\d{1,2})",
+            user_prompt,
+        )
+    if day_range:
+        year = datetime.now().year
+        start_month = int(day_range.group("start_month"))
+        start_day = int(day_range.group("start_day"))
+        end_month = int(day_range.group("end_month"))
+        end_day = int(day_range.group("end_day"))
+        end_year = year + 1 if end_month < start_month else year
+        return {
+            "start_date": _format_date(year, start_month, start_day),
+            "end_date": _format_date(end_year, end_month, end_day),
+            "keyword": keyword,
+        }
+
     # 3) 단일 날짜나 월만 지정된 경우 → 월 전체 범위로 간주
     single_date = re.search(
         r"(?P<year>\d{4})년\s*(?P<month>\d{1,2})월(?:\s*(?P<day>\d{1,2})일)?",
@@ -451,6 +479,26 @@ def rule_based_plan_parse(user_prompt: str) -> dict[str, str | None]:
         return {
             "start_date": start_date,
             "end_date": end_date,
+            "keyword": keyword,
+        }
+
+    # 3-1) 연도 없이 월/일만 지정된 경우는 현재 연도로 보정
+    month_day = re.search(
+        r"(?P<month>\d{1,2})월\s*(?P<day>\d{1,2})일?",
+        user_prompt,
+    )
+    if not month_day:
+        month_day = re.search(
+            r"(?P<month>\d{1,2})[./-](?P<day>\d{1,2})",
+            user_prompt,
+        )
+    if month_day:
+        year = datetime.now().year
+        month = int(month_day.group("month"))
+        day = int(month_day.group("day"))
+        return {
+            "start_date": _format_date(year, month, day),
+            "end_date": _format_date(year, month, day),
             "keyword": keyword,
         }
 
@@ -584,7 +632,7 @@ def build_diary_format_prompt(req: DiaryFormatRequest) -> str:
    - people: 등장한 인물 또는 관계(아내, 딸, 부모님 등)
    - location: \"home\", \"office\", \"cafe\", \"outdoor\" 등 한 단어로 요약
    - type: \"diary\" 고정
-   - projects: [\"소설아이디어\", \"NGO\", \"IT\", \"가족\"] 중 일기와 가장 관련 높은 1~2개 선택
+   - projects: \"소설아이디어\", \"NGO\", \"IT\", \"가족\" 중 일기와 가장 관련 높은 1~2개 선택
    - scene_potential: 원본 일기가 소설 장면으로 확장할 가치가 있으면 true 아니면 false
    - summary: 일기를 한 문장으로 정교하게 요약
 
@@ -1099,13 +1147,12 @@ def build_diary_repair_prompt(original_md: str) -> str:
     - YAML 메타데이터를 점검/보완
     - 누락된 필드를 채우고, 이상한 값은 자연스럽게 수정
     - 본문 섹션 구조는 유지하되, 약간의 다듬기는 허용
-    - '원본 텍스트' 코드블럭 내용은 절대 바꾸지 않기
     - 이미 존재하는 mood, mood_score 값은 덮어쓰지 말고 그대로 유지
     """
     return f"""
 당신은 '일기 메타데이터 검수/보정 전문가'입니다.
 
-입력: 사용자의 기존 일기 Markdown (YAML + 본문 + 원본 텍스트)
+입력: 사용자의 기존 일기 Markdown (YAML + 본문)
 
 작업 목표:
 1. YAML front-matter를 점검하고 아래 필드들을 모두 올바르게 채우세요.
@@ -1134,13 +1181,12 @@ def build_diary_repair_prompt(original_md: str) -> str:
    - # TODO / 다음에 이어서 쓸 것 (옵션)
    이 섹션 구조는 유지하되, 내용이 너무 빈약하면 자연스럽게 조금 보완해도 됩니다.
 
-3. "원본 텍스트 (자동 보존)" 섹션이 있다면
-   - ```text ... ``` 코드 블럭 안의 내용은 절대 수정하지 마세요.
-   - 없다면, 입력 Markdown에서 원본 일기 내용 부분을 찾아
-     맨 아래에 "원본 텍스트 (자동 보존)" 섹션을 새로 만들어 넣으세요.
+3. “입력에 YAML이 있더라도 최종 결과는 YAML front-matter를 오직 1개만 만들고, 나머지 YAML 블록은 절대 남기지 마세요.”
+
+4. “입력에 ‘참고용 원문(출력 금지)’ 섹션이 있더라도, 최종 출력에는 절대 포함하지 말고 제거하세요.”
 
 아래는 사용자가 저장한 기존 Markdown입니다.
-이를 기반으로 위 규칙에 맞는 완성된 Markdown 전체를 다시 출력하세요.
+이를 기반으로 위 규칙에 맞는 완성된 Markdown 전체로 대체하세요.
 
 ----- 기존 Markdown 시작 -----
 {original_md}
@@ -2009,7 +2055,9 @@ def _save_critique_result(title: str, critique_text: str, object_path: str) -> s
     return str(path)
 
 
-def _build_critique_prompt(title: str, content: str, criteria: str) -> str:
+def _build_critique_prompt(title: str, content: str, criteria: str, extra_instruction: str | None = None) -> str:
+    extra = extra_instruction.strip() if extra_instruction else ""
+    extra_block = f"\n\n[추가 지시사항]\n{extra}" if extra else ""
     return f"""
 너는 단편소설 합평 전문 에디터다. 아래 구조를 반드시 지켜 출력하라.
 
@@ -2021,6 +2069,7 @@ def _build_critique_prompt(title: str, content: str, criteria: str) -> str:
 
 [입력 원고]
 {content}
+{extra_block}
 
 --- 출력 형식 (반드시 이 순서로) ---
 (1) 한 줄 총평
@@ -2028,6 +2077,143 @@ def _build_critique_prompt(title: str, content: str, criteria: str) -> str:
 (3) 개선 제안: 구체적으로 몇 라인/어느 문단을 어떤 표현·묘사·방향으로 수정할지 제안 (장면/문단 단위)
 (4) 기준 준수 여부 체크리스트: 합평기준규칙.md 항목을 그대로 나열하고 각 항목에 대해 준수/미흡 + 한 줄 근거
 """.strip()
+
+
+def _build_critique_chunk_prompt(
+    title: str,
+    content: str,
+    criteria: str,
+    part_index: int,
+    total_parts: int,
+    extra_instruction: str | None = None,
+) -> str:
+    extra = extra_instruction.strip() if extra_instruction else ""
+    extra_block = f"\n\n[추가 지시사항]\n{extra}" if extra else ""
+    return f"""
+너는 단편소설 합평 전문 에디터다. 아래 구조를 반드시 지켜 출력하라.
+이 파트는 원고의 일부이므로, 이 파트의 내용에만 근거해 평가하라.
+
+[합평 기준]
+{criteria}
+
+[입력 원고 제목]
+{title}
+
+[입력 원고 파트 {part_index}/{total_parts}]
+{content}
+{extra_block}
+
+--- 출력 형식 (반드시 이 순서로) ---
+(0) 파트 요약: 2~3문장으로 현재 파트에서 무슨 일이 벌어지는지 요약
+(1) 한 줄 총평
+(2) 항목별 점수: 각 항목 10점 만점, 근거로 원고 문장/문단을 인용
+(3) 개선 제안: 구체적으로 몇 라인/어느 문단을 어떤 표현·묘사·방향으로 수정할지 제안 (장면/문단 단위)
+(4) 기준 준수 여부 체크리스트: 합평기준규칙.md 항목을 그대로 나열하고 각 항목에 대해 준수/미흡 + 한 줄 근거
+""".strip()
+
+
+def _build_critique_overall_prompt(
+    title: str,
+    part_summaries: list[str],
+    criteria: str,
+    extra_instruction: str | None = None,
+) -> str:
+    summary_lines = "\n".join([f"- 파트 {idx}: {summary}" for idx, summary in enumerate(part_summaries, start=1)])
+    extra = extra_instruction.strip() if extra_instruction else ""
+    extra_block = f"\n\n[추가 지시사항]\n{extra}" if extra else ""
+    return f"""
+너는 단편소설 합평 전문 에디터다. 아래 구조를 반드시 지켜 출력하라.
+아래 파트 요약을 바탕으로 작품 전체의 구조/전개/정서 흐름을 평가하라.
+
+[합평 기준]
+{criteria}
+
+[입력 원고 제목]
+{title}
+
+[파트 요약]
+{summary_lines}
+{extra_block}
+
+--- 출력 형식 (반드시 이 순서로) ---
+(1) 한 줄 총평
+(2) 항목별 점수: 각 항목 10점 만점, 근거로 파트 요약을 인용
+(3) 개선 제안: 작품 전체 구조/전개/정서 흐름 중심으로 구체적 수정 방향 제안
+(4) 기준 준수 여부 체크리스트: 합평기준규칙.md 항목을 그대로 나열하고 각 항목에 대해 준수/미흡 + 한 줄 근거
+""".strip()
+
+
+def _split_critique_chunks(text: str, max_chars: int, max_parts: int) -> list[str]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return [""]
+    paragraphs = re.split(r"\n\s*\n", normalized)
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) > max_chars:
+            if current:
+                chunks.append("\n\n".join(current))
+                if len(chunks) >= max_parts:
+                    return chunks
+                current = []
+                current_len = 0
+            start = 0
+            while start < len(para):
+                part = para[start:start + max_chars]
+                chunks.append(part)
+                if len(chunks) >= max_parts:
+                    return chunks
+                start += max_chars
+            continue
+
+        extra_len = len(para) + (2 if current else 0)
+        if current_len + extra_len > max_chars:
+            chunks.append("\n\n".join(current))
+            if len(chunks) >= max_parts:
+                return chunks
+            current = [para]
+            current_len = len(para)
+        else:
+            current.append(para)
+            current_len += extra_len
+
+    if current and len(chunks) < max_parts:
+        chunks.append("\n\n".join(current))
+
+    return chunks
+
+
+def _extract_chunk_summary(text: str) -> str | None:
+    if not text:
+        return None
+    match = re.search(r"^\(0\)\s*파트 요약[:：]?\s*(.+)$", text, re.M)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"^파트 요약[:：]?\s*(.+)$", text, re.M)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _fallback_chunk_summary(content: str, max_chars: int = 300) -> str:
+    trimmed = re.sub(r"\s+", " ", (content or "").strip())
+    return trimmed[:max_chars] if trimmed else "요약 없음"
+
+
+def _assemble_chunked_critique(chunk_outputs: list[str], overall_text: str) -> str:
+    parts: list[str] = ["## 파트별 합평"]
+    total_parts = len(chunk_outputs)
+    for idx, text in enumerate(chunk_outputs, start=1):
+        body = (text or "").strip()
+        parts.append(f"### 파트 {idx}/{total_parts}\n{body}")
+    parts.append("---\n\n## 전체 합평\n" + (overall_text or "").strip())
+    return "\n\n".join(parts).strip()
 
 
 @app.post("/api/critique", operation_id="api_critique")
@@ -2038,8 +2224,40 @@ async def api_critique(req: CritiqueRequest):
 
     # 기준 로드 및 LLM 합평 생성
     criteria = _load_critique_criteria()
-    prompt = _build_critique_prompt(req.title, req.content, criteria)
-    critique_text = await call_llm(prompt)
+    critique_text: str
+    if opts.chunked_critique:
+        max_chars = opts.chunk_max_chars or CRITIQUE_CHUNK_MAX_CHARS
+        max_parts = opts.max_parts or CRITIQUE_CHUNK_MAX_PARTS
+        chunks = _split_critique_chunks(req.content, max_chars=max_chars, max_parts=max_parts)
+        chunk_outputs: list[str] = []
+        part_summaries: list[str] = []
+        total_parts = len(chunks)
+
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_prompt = _build_critique_chunk_prompt(
+                req.title,
+                chunk,
+                criteria,
+                part_index=idx,
+                total_parts=total_parts,
+                extra_instruction=req.extra_instruction,
+            )
+            chunk_text = await call_llm(chunk_prompt)
+            chunk_outputs.append(chunk_text)
+            summary = _extract_chunk_summary(chunk_text) or _fallback_chunk_summary(chunk)
+            part_summaries.append(summary)
+
+        overall_prompt = _build_critique_overall_prompt(
+            req.title,
+            part_summaries,
+            criteria,
+            extra_instruction=req.extra_instruction,
+        )
+        overall_text = await call_llm(overall_prompt)
+        critique_text = _assemble_chunked_critique(chunk_outputs, overall_text)
+    else:
+        prompt = _build_critique_prompt(req.title, req.content, criteria, extra_instruction=req.extra_instruction)
+        critique_text = await call_llm(prompt)
 
     critique_path: str | None = None
     if opts.save_critique or (opts.save_work is True):

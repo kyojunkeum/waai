@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 
@@ -7,11 +8,28 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-DIARY_ROOT = os.environ.get("DIARY_ROOT", "/data/diary")
-IDEAS_ROOT = os.environ.get("IDEAS_ROOT", "/data/ideas")
-WEB_RESEARCH_ROOT = os.environ.get("WEB_RESEARCH_ROOT", "/data/web_research")
-WORKS_ROOT = os.environ.get("WORKS_ROOT", "/data/works")
-BIBLE_ROOT = os.environ.get("BIBLE_ROOT", "/data/bible")
+def _resolve_data_path(env_var: str, default_subpath: str) -> Path:
+    candidates: list[Path] = []
+
+    env_value = os.environ.get(env_var)
+    if env_value:
+        candidates.append(Path(env_value))
+
+    candidates.append(Path("/data") / default_subpath)
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.append(repo_root / "data" / default_subpath)
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[-1]
+
+
+DIARY_ROOT = str(_resolve_data_path("DIARY_ROOT", "diary"))
+IDEAS_ROOT = str(_resolve_data_path("IDEAS_ROOT", "ideas"))
+WEB_RESEARCH_ROOT = str(_resolve_data_path("WEB_RESEARCH_ROOT", "web_research"))
+WORKS_ROOT = str(_resolve_data_path("WORKS_ROOT", "works"))
+BIBLE_ROOT = str(_resolve_data_path("BIBLE_ROOT", "bible"))
 MCP_FILESYSTEM_URL = os.environ.get("MCP_FILESYSTEM_URL", "http://mcp-filesystem:7001")
 DEFAULT_LIMIT_PER_TYPE = int(os.environ.get("LIMIT_PER_TYPE", "10"))
 TYPE_LIMIT_OVERRIDES = {

@@ -1,0 +1,91 @@
+############################
+# Python
+############################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.env
+.venv/
+venv/
+ENV/
+
+############################
+# Python tools
+############################
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+############################
+# FastAPI / Uvicorn
+############################
+*.log
+logs/
+uvicorn.log
+
+############################
+# Data / Runtime files
+############################
+data/
+waai/data/
+memory/
+cache/
+tmp/
+uploads/
+*.sqlite3
+
+############################
+# Model / AI artifacts
+############################
+models/
+checkpoints/
+vector_db/
+chromadb/
+faiss/
+embeddings/
+
+############################
+# Jupyter
+############################
+.ipynb_checkpoints/
+
+############################
+# Docker
+############################
+docker-data/
+docker-volumes/
+*.pid
+
+############################
+# OS
+############################
+.DS_Store
+Thumbs.db
+
+############################
+# VS Code
+############################
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+############################
+# WSL
+############################
+.wslconfig
+
+############################
+# Secrets
+############################
+*.key
+*.pem
+*.crt
+*.secret
+.env.*

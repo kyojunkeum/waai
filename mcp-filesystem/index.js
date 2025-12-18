@@ -3,14 +3,38 @@ import fs from "fs";
 import path from "path";
 import url from "url";
 import YAML from "yaml";
+import os from "os";
 
 const app = express();
 const port = process.env.PORT || 7001;
-const DIARY_ROOT = process.env.DIARY_ROOT || "/data/diary";
-const IDEAS_ROOT = process.env.IDEAS_ROOT || "/data/ideas";
-const WEB_RESEARCH_ROOT = process.env.WEB_RESEARCH_ROOT || "/data/web_research";
-const WORKS_ROOT = process.env.WORKS_ROOT || "/data/works";
-const BIBLE_ROOT = process.env.BIBLE_ROOT || "/data/bible";
+
+const __filename = url.fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, "..");
+
+function resolveDataPath(envVar, defaultSubpath) {
+  const candidates = [];
+  const envValue = process.env[envVar];
+  if (envValue) {
+    candidates.push(envValue);
+  }
+  candidates.push(path.join("/data", defaultSubpath));
+  candidates.push(path.join(REPO_ROOT, "data", defaultSubpath));
+  candidates.push(path.join(os.homedir(), ".waai", defaultSubpath));
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return candidates[candidates.length - 1];
+}
+
+const DIARY_ROOT = resolveDataPath("DIARY_ROOT", "diary");
+const IDEAS_ROOT = resolveDataPath("IDEAS_ROOT", "ideas");
+const WEB_RESEARCH_ROOT = resolveDataPath("WEB_RESEARCH_ROOT", "web_research");
+const WORKS_ROOT = resolveDataPath("WORKS_ROOT", "works");
+const BIBLE_ROOT = resolveDataPath("BIBLE_ROOT", "bible");
 const DEFAULT_LIMIT_PER_TYPE = parseInt(process.env.LIMIT_PER_TYPE || "10", 10);
 const DEFAULT_PREVIEW_CHARS = parseInt(process.env.PREVIEW_CHARS || "1200", 10);
 

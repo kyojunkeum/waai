@@ -136,8 +136,9 @@ services:
     build: ./data-format-bot
     container_name: data-format-bot
     environment:
-      - LLM_API_URL=http://waai-backend:8000/api/diary/format
+      - LLM_FIX_URL=http://waai-backend:8000/api/diary/reformat-md
       - DATA_REFORMAT_URL=http://waai-backend:8000/api/data/reformat-md
+      - DIARY_INPUT_DIR=/home/witness/memory/diary
       - MULTI_BASE_INPUT=/home/witness/memory
       - MULTI_BASE_OUTPUT=/home/witness/waai/data
       - IGNORE_PROCESSED=true
@@ -171,11 +172,14 @@ services:
       - CPU_THRESHOLD=80
       - GPU_THRESHOLD=80
       - DIARY_DIR=/waai/data/diary
+      - CRITIQUE_INBOX_DIR=/home/witness/waai/data/objects
+      - CRITIQUE_API_URL=http://waai-backend:8000/api/critique
     depends_on:
       - waai-backend
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data/diary:/waai/data/diary:ro
+      - /home/witness/waai/data/objects:/home/witness/waai/data/objects:ro
     networks:
       - waai-net
     restart: unless-stopped
