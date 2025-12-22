@@ -283,6 +283,96 @@ def extract_front_matter(md: str) -> Tuple[dict, str, bool]:
     return meta, body, True
 
 
+def _extract_front_matter_loose(md: str) -> tuple[dict, str, str, bool]:
+    """
+    Attempt to find YAML front matter even if prefixed by extra text.
+    Returns (meta_dict, body_text, normalized_md, found).
+    """
+    if not md:
+        return {}, "", md, False
+
+    lines = md.splitlines()
+
+    def is_yamlish(line: str) -> bool:
+        s = line.strip()
+        if not s:
+            return True
+        if s.startswith("#"):
+            return True
+        if s.startswith("-"):
+            return True
+        first = s.split()[0]
+        return ":" in first
+
+    search_from = 0
+    while search_from < len(lines):
+        start_idx = None
+        for i in range(search_from, len(lines)):
+            if lines[i].strip() == "---":
+                start_idx = i
+                break
+        if start_idx is None:
+            break
+
+        collected: list[str] = []
+        end_idx = None
+        for i in range(start_idx + 1, len(lines)):
+            s = lines[i].strip()
+            if s == "---":
+                end_idx = i
+                break
+            if collected and not is_yamlish(lines[i]):
+                end_idx = i
+                break
+            if not collected and not is_yamlish(lines[i]):
+                continue
+            collected.append(lines[i])
+
+        if not collected:
+            search_from = (end_idx or start_idx + 1) + 1
+            continue
+
+        meta_text = "\n".join(collected)
+        try:
+            meta = yaml.safe_load(meta_text) or {}
+        except Exception:
+            meta = {}
+        if not isinstance(meta, dict) or not meta:
+            body_start = end_idx + 1 if end_idx is not None else (start_idx + 1 + len(collected))
+            search_from = body_start + 1
+            continue
+
+        body_start = end_idx + 1 if end_idx is not None else (start_idx + 1 + len(collected))
+        body_lines = lines[body_start:]
+
+        block_lines = ["---"] + collected
+        if end_idx is None or (end_idx is not None and lines[end_idx].strip() != "---"):
+            block_lines.append("---")
+        else:
+            block_lines.append("---")
+
+        normalized_md = "\n".join(block_lines + body_lines)
+        body = "\n".join(body_lines)
+        return meta, body, normalized_md, True
+
+    return {}, md, md, False
+
+
+def normalize_front_matter_output(md: str) -> tuple[str, dict, str, bool]:
+    """
+    Ensure YAML front matter exists at the start; if possible, strip leading chatter.
+    Returns (normalized_md, meta_dict, body_text, has_front_matter).
+    """
+    meta, body, has_fm = extract_front_matter(md)
+    if has_fm:
+        return md, meta, body, True
+
+    meta2, body2, normalized_md, found = _extract_front_matter_loose(md)
+    if found:
+        return normalized_md, meta2, body2, True
+    return md, {}, md, False
+
+
 def _iso_datetime_like(val: Any) -> bool:
     if isinstance(val, datetime):
         return True
@@ -439,9 +529,8 @@ async def call_llm_with_front_matter_retry(
 
     for attempt in range(retries + 1):
         md = await call_llm(prompt)
+        md, meta, body, has_fm = normalize_front_matter_output(md)
         last_md = md
-
-        meta, body, has_fm = extract_front_matter(md)
 
         try:
             if must_have_front_matter and not has_fm:
