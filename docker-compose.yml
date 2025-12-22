@@ -132,7 +132,9 @@ services:
       WORKS_ROOT: "/data/works"
       BIBLE_ROOT: "/data/bible"
       PLAYWRIGHT_MCP_URL: "http://mcp-playwright:7003"
+      STATS_HISTORY_PATH: "/data/_stats/stats_history.jsonl"
     volumes:
+      - ./data/_stats:/data/_stats
       - ./data/outputs:/data/outputs
       - ./data/diary:/data/diary
       - ./data/ideas:/data/ideas
@@ -161,17 +163,20 @@ services:
     build: ./data-format-bot
     container_name: data-format-bot
     environment:
+      - SCAN_ROOT=/home/witness/waai/data
       - LLM_FIX_URL=http://waai-backend:8000/api/diary/reformat-md
       - DATA_REFORMAT_URL=http://waai-backend:8000/api/data/reformat-md
       - DIARY_INPUT_DIR=/home/witness/memory/diary
       - MULTI_BASE_INPUT=/home/witness/memory
       - MULTI_BASE_OUTPUT=/home/witness/waai/data
       - IGNORE_PROCESSED=true
+      - STATS_DIR=/home/witness/waai/data/_stats
     volumes:
       - /home/witness/memory/diary:/input
       - ./data/diary:/output
       - /home/witness/memory:/home/witness/memory
       - ./data:/home/witness/waai/data
+      - ./data/_stats:/home/witness/waai/data/_stats
     depends_on:
       - waai-backend
     networks:

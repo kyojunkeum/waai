@@ -109,6 +109,10 @@ LLM_VALIDATE_RETRIES=2
 PLAN_MIN_CHARS=800
 CRITIQUE_MIN_CHARS=600
 
+# stat 히스토리 경로
+STATS_HISTORY_PATH = Path(os.environ.get("STATS_HISTORY_PATH", "/data/_stats/stats_history.jsonl"))
+
+
 class DiaryFormatRequest(BaseModel):
     date: str       # "2025-12-10"
     time: str       # "23:15"
@@ -261,6 +265,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def load_stats_history(limit: int = 200):
+    if not STATS_HISTORY_PATH.exists():
+        return []
+    rows = []
+    for line in STATS_HISTORY_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    return rows
+
 
 def extract_front_matter(md: str) -> Tuple[dict, str, bool]:
     """
@@ -537,7 +556,7 @@ async def call_llm_with_front_matter_retry(
                 raise ValueError("front-matter is missing. Output must start with YAML front-matter.")
 
             validate_meta_fn(meta)
-
+            logger.info("[llm_retry] attempt=%s has_front_matter=%s", attempt, has_fm)
             # 통과하면 그대로 반환
             return md
 
@@ -545,7 +564,9 @@ async def call_llm_with_front_matter_retry(
             last_err = str(exc)
             if attempt >= retries:
                 # 마지막 실패는 원문 그대로 반환하지 말고, 호출자 쪽에서 에러 처리할지 선택 가능
+                logger.info("[llm_retry] validation_failed=%s", last_err)
                 raise ValueError(f"LLM output validation failed after retries: {last_err}")
+
 
             # 다음 시도용 프롬프트 강화
             prompt = (
@@ -1631,6 +1652,7 @@ async def dashboard(
     request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
+    stats_history = load_stats_history(limit=200)
 ):
     mood_stats = await get_mood_stats(start_date=start_date, end_date=end_date)
     data_roots = {

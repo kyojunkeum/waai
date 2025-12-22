@@ -42,6 +42,37 @@
     </div>
   </div>
 
+  <h2>정제 품질 추이 (최근 200회)</h2>
+
+{% if not stats_history or stats_history|length == 0 %}
+  <p>(stats 기록이 없습니다. data-format-bot의 /stats 호출이 누적되면 표시됩니다.)</p>
+{% else %}
+  <table border="1" cellpadding="6" cellspacing="0">
+    <thead>
+      <tr>
+        <th>time</th>
+        <th>total_md</th>
+        <th>no_front_matter_pct</th>
+        <th>missing_required_pct</th>
+        <th>tags_violate_pct</th>
+        <th>summary_short_pct</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in stats_history|reverse %}
+      <tr>
+        <td>{{ r.get("time","") }}</td>
+        <td>{{ r.get("total_md","") }}</td>
+        <td>{{ r.get("no_front_matter_pct","") }}</td>
+        <td>{{ r.get("missing_required_pct","") }}</td>
+        <td>{{ r.get("tags_violate_pct","") }}</td>
+        <td>{{ r.get("summary_short_pct","") }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+
   <script>
     const moodStats = {{ mood_stats | tojson | safe }};
 

@@ -12,6 +12,9 @@ import http.server
 import socketserver
 import requests
 import yaml
+from typing import Any,Dict,Tuple,Optional
+
+
 
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8001"))    # /health port
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "10"))  # 초 단위
@@ -26,6 +29,119 @@ STATE = {
     "last_processed_at": None,
     "last_error": None,
 }
+
+app = FastAPI()
+
+# =========================
+# Schema score (stats)
+# =========================
+
+STATS_DIR = Path(os.getenv("STATS_DIR", "/home/witness/waai/data/_stats"))
+STATS_HISTORY_PATH = STATS_DIR / "stats_history.jsonl"
+STATS_MAX_LINES = int(os.getenv("STATS_MAX_LINES", "2000"))
+
+SCAN_ROOT = Path(os.getenv("SCAN_ROOT","/home/witness/waai/data"))
+TAGS_MIN =int(os.getenv("TAGS_MIN","3"))
+TAGS_MAX =int(os.getenv("TAGS_MAX","7"))
+SUMMARY_MIN_LEN =int(os.getenv("SUMMARY_MIN_LEN","20"))
+
+REQUIRED_DIARY_KEYS = os.getenv(
+"REQUIRED_DIARY_KEYS",
+"type,created_at,title,summary,tags",
+).split(",")
+
+REQUIRED_DATA_KEYS = os.getenv(
+"REQUIRED_DATA_KEYS",
+"type,created_at,title,summary,tags,source_url",
+).split(",")
+
+
+def_extract_front_matter(md_text: str) ->Tuple[Optional[Dict[str,Any]],str]:
+ifnot md_text.startswith("---"):
+returnNone, md_text
+    parts = md_text.split("\n---\n",1)
+iflen(parts) !=2:
+returnNone, md_text
+try:
+        meta = yaml.safe_load(parts[0][3:].strip())or {}
+return meta, parts[1]
+except Exception:
+returnNone, md_text
+
+
+def_doc_kind(meta: Dict[str,Any], path: Path) ->str:
+    t =str(meta.get("type","")).strip()
+if t:
+return t
+if"diary"in path.parts:
+return"diary"
+return"data"
+
+
+def_validate(meta: Dict[str,Any], kind:str) ->Dict[str,bool]:
+    required = REQUIRED_DIARY_KEYSif kind =="diary"else REQUIRED_DATA_KEYS
+
+    missing_required =any(
+        meta.get(k.strip())in [None,"", []]for kin required
+    )
+
+    tags = meta.get("tags", [])
+ifisinstance(tags,str):
+        tags = [t.strip()for tin tags.split(",")if t.strip()]
+    tags_violate =not (isinstance(tags,list)and TAGS_MIN <=len(tags) <= TAGS_MAX)
+
+    summary =str(meta.get("summary","")).strip()
+    summary_short =len(summary) < SUMMARY_MIN_LEN
+
+return {
+"missing_required": missing_required,
+"tags_violate": tags_violate,
+"summary_short": summary_short,
+    }
+
+
+defscan_and_score(root: Path) ->Dict[str,Any]:
+    md_files =list(root.rglob("*.md"))
+
+    total =0
+    no_front_matter =0
+    missing_required =0
+    tags_violate =0
+    summary_short =0
+
+for pin md_files:
+try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+except Exception:
+continue
+
+        total +=1
+        meta, _ = _extract_front_matter(text)
+ifnot meta:
+            no_front_matter +=1
+continue
+
+        kind = _doc_kind(meta, p)
+        r = _validate(meta, kind)
+
+if r["missing_required"]:
+            missing_required +=1
+if r["tags_violate"]:
+            tags_violate +=1
+if r["summary_short"]:
+            summary_short +=1
+
+defrate(x: int) ->float:
+return0.0if total ==0elseround((x / total) *100,2)
+
+return {
+"scan_root":str(root),
+"total_md": total,
+"no_front_matter_pct": rate(no_front_matter),
+"missing_required_pct": rate(missing_required),
+"tags_violate_pct": rate(tags_violate),
+"summary_short_pct": rate(summary_short),
+    }
 
 
 def update_state_on_success(filename: str):
@@ -88,10 +204,30 @@ IGNORE_PROCESSED = os.getenv("IGNORE_PROCESSED", "false").lower() == "true"
 def ensure_dirs():
     DIARY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DIARY_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    STATS_DIR.mkdir(parents=True, exist_ok=True)
     for cfg in TYPE_CONFIGS.values():
         cfg["output"].mkdir(parents=True, exist_ok=True)
         (cfg["input"] / "_processed").mkdir(parents=True, exist_ok=True)
 
+def append_stats_history(stats: dict):
+    """
+    stats dict를 JSONL로 누적 저장한다.
+    최근 STATS_MAX_LINES 줄만 유지.
+    """
+    STATS_DIR.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(stats, ensure_ascii=False)
+
+    # append
+    with open(STATS_HISTORY_PATH, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+    # trim
+    try:
+        lines = STATS_HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+        if len(lines) > STATS_MAX_LINES:
+            STATS_HISTORY_PATH.write_text("\n".join(lines[-STATS_MAX_LINES:]) + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
 def load_processed_records(record_path: Path):
     """
@@ -553,6 +689,10 @@ def start_health_server():
         print(f"[INFO] data-format-bot health server started on port {HEALTH_PORT}")
         httpd.serve_forever()
 
+@app.get("/stats")
+defstats():
+append_stats_history(stats)
+return scan_and_score(SCAN_ROOT)
 
 # -----------------------------
 # 메인
@@ -590,6 +730,7 @@ def main():
         time.sleep(SCAN_INTERVAL)
         processed_files = scan_diary(processed_files)
         processed_generic = scan_generic(processed_generic)
+
 
 
 if __name__ == "__main__":
