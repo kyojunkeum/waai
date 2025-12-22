@@ -1,5 +1,21 @@
 
 services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main
+    container_name: litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      - OPENAI-API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - ollama
+    networks:
+      - waai-net
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama
     container_name: ollama
@@ -94,6 +110,13 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # ✅ LiteLLM로 우회하도록 변경
+      LLM_BACKEND: "openai"
+      OPENAI_BASE_URL: "http://litellm:4000/v1"
+      OPENAI_MODEL: "qwen2_7b_ollama"
+      # 프록시가 OpenAI로도 나갈 수 있게(선택) 키 전달
+      # (Ollama만 쓸 거면 없어도 되지만 보통 두는 편)
+      OPENAI_API_KEY: "dummy-key"
       OLLAMA_URL: "http://ollama:11434"
       #MODEL_NAME: "llama3.1"
       MODEL_NAME: "qwen2:7b"
@@ -119,6 +142,7 @@ services:
       - /home/witness/memory/webresearch:/memory/webresearch
     depends_on:
       - ollama
+      - litellm
       - mcp-filesystem
       - mcp-bridge
       - mcp-playwright

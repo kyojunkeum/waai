@@ -1,0 +1,10 @@
+model_list:
+  - model_name: qwen2_7b_ollama
+    litellm_params:
+      model: ollama/qwen2:7b
+      api_base: http://ollama:11434
+
+  - model_name: gpt_4_1_mini
+    litellm_params:
+      model: openai/gpt-4.1-mini
+      api_key: os.environ/OPENAI_API_KEY

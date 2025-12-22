@@ -307,14 +307,15 @@ def call_llm_for_data_reformat(doc_type: str, md_text: str) -> str:
 def build_draft_md(date: str, time_str: str, title: str, raw_text: str) -> str:
     raw_text = raw_text.rstrip("\n")
 
-    front_matter = f"""---
-type: diary
-date: {date}
-time: "{time_str}"
-title: "{title}"
----""".rstrip()
+    # title / time_str 등은 yaml이 안전하게 quoting 처리하도록 맡김
+    header_obj = {
+        "type": "diary",
+        "date": date,
+        "time": str(time_str),
+        "title": str(title),
+    }
+    header_yaml = yaml.safe_dump(header_obj, allow_unicode=True, sort_keys=False).rstrip()
 
-    # 최소 본문 골격: LLM이 섹션을 채우도록 유도
     body = "\n".join(
         [
             "# 오늘 요약",
@@ -331,22 +332,26 @@ title: "{title}"
         ]
     ).rstrip()
 
-    return f"{front_matter}\n\n{body}".rstrip() + "\n"
+    return f"---\n{header_yaml}\n---\n\n{body}\n"
+
+def _pick_code_fence(text: str, base: str = "```") -> str:
+    # 원문에 ```이 있으면 `````, `````` …처럼 더 긴 fence를 선택
+    fence = base
+    while fence in (text or ""):
+        fence += "`"
+    return fence
 
 def append_raw_text(final_md: str, raw_text: str) -> str:
-    """
-    최종 md 맨 아래에 raw_text(원본 txt 줄글)만 '그대로' 붙인다.
-    - 이 부분은 LLM이 아니라 시스템이 책임진다.
-    """
     raw_text = raw_text.rstrip("\n")
+    fence = _pick_code_fence(raw_text, base="```")
 
     return (
         final_md.rstrip()
         + "\n\n---\n\n"
         + "## 원본 텍스트 (자동 보존 · 수정 금지)\n"
-        + "```text\n"
+        + f"{fence}text\n"
         + raw_text
-        + "\n```\n"
+        + f"\n{fence}\n"
     )
 
 
