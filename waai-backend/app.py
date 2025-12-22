@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, validator, ValidationError
+from pydantic import BaseModel, Field, field_validator, ValidationError
 from starlette.templating import Jinja2Templates
 
 from mcp_client import (
@@ -256,7 +256,6 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://open-webui:8080",
         "http://open-webui:3000",
-        "*",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -474,22 +473,20 @@ async def call_llm_with_front_matter_retry(
     return last_md
 
 class DiarySchema(BaseModel):
-    date: str                     # YYYY-MM-DD
-    mood_score: float = Field(
-        ge=-1.0,
-        le=1.0,
-        description="감정 점수 (-1.0 ~ 1.0, 소수점 1자리)"
-    )
+    date: str
+    mood_score: float = Field(ge=-1.0, le=1.0)
     summary: str
     body: str
     tags: List[str]
 
-    @validator("date")
+    @field_validator("date")
+    @classmethod
     def validate_date(cls, v):
         datetime.strptime(v, "%Y-%m-%d")
         return v
 
-    @validator("mood_score")
+    @field_validator("mood_score")
+    @classmethod
     def validate_mood_score_precision(cls, v):
         if round(v, 1) != v:
             raise ValueError("mood_score must have at most 1 decimal place")
@@ -1898,8 +1895,6 @@ async def generate_plan_from_data_internal(req: PlanFromDataRequest) -> PlanGene
         include=includes,
         sources=sources_dict,
     )
-    final_text = header_str + plan_text_with_sources
-
     final_text = header_str + plan_text_with_sources
 
     # ✅ 최종 결과(front-matter 포함) 검증

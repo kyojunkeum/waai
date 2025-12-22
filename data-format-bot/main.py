@@ -409,6 +409,27 @@ def handle_new_file(file_path: Path) -> bool:
         print(f"[ERROR] handle_new_file failed: {e}")
         return False
 
+def strip_raw_text_sections(md: str) -> str:
+    """
+    LLM이 '원본 텍스트(자동 보존)' 섹션이나 ```text 블럭을 포함해 반환하는 경우 제거.
+    (generic 타입은 원문을 YAML/본문에 녹이는 구조라면, 중복 원문 섹션은 제거하는 게 맞음)
+    """
+    if not md:
+        return md
+
+    # 흔한 헤더/구분선 패턴들 기준으로 잘라내기
+    patterns = [
+        r"\n##\s*원본\s*텍스트.*$",              # "## 원본 텍스트..." 이후 제거
+        r"\n##\s*원문.*$",                      # "## 원문..." 이후 제거
+        r"\n#\s*원문\s*초안.*$",                # "# 원문 초안" 이후 제거
+        r"\n```text\s*[\s\S]*?\n```",          # text 코드블럭 제거
+    ]
+
+    out = md
+    for pat in patterns:
+        out = re.sub(pat, "", out, flags=re.IGNORECASE)
+
+    return out.strip() + "\n"
 
 def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
     if file_path.suffix.lower() != ".txt":
