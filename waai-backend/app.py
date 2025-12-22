@@ -9,16 +9,16 @@ import re
 from urllib.parse import quote_plus
 from datetime import datetime, date
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 from collections import deque
-
+from typing import Tuple, Optional, Callable
 import httpx
 import yaml
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, validator, ValidationError
 from starlette.templating import Jinja2Templates
 
 from mcp_client import (
@@ -101,6 +101,13 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 PLAYWRIGHT_MCP_URL = os.environ.get("PLAYWRIGHT_MCP_URL", "http://mcp-playwright:7003")
 SEARXNG_URL = os.environ.get("SEARXNG_URL")
 
+# YAML Front Matter 검증시 사용
+FRONT_MATTER_RE = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n?", re.S)
+
+# 재시도 검증 시 사용
+LLM_VALIDATE_RETRIES=2
+PLAN_MIN_CHARS=800
+CRITIQUE_MIN_CHARS=600
 
 class DiaryFormatRequest(BaseModel):
     date: str       # "2025-12-10"
@@ -128,7 +135,6 @@ class DataReformatRequest(BaseModel):
 
 class DataReformatResponse(BaseModel):
     result: str     # 보정된 md 전체 텍스트
-
 
 class PlanGenerateRequest(BaseModel):
     """
@@ -230,6 +236,12 @@ class CritiqueResponse(BaseModel):
     path: str
     critique: str
 
+## 데이터 폼 유효성 검증 스키마
+class ReformatResult(BaseModel):
+    front_matter: dict
+    body: str
+    tags: list[str]
+
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
@@ -250,6 +262,238 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def extract_front_matter(md: str) -> Tuple[dict, str, bool]:
+    """
+    Returns: (meta_dict, body_text, has_front_matter)
+    """
+    if not md:
+        return {}, "", False
+    m = FRONT_MATTER_RE.match(md)
+    if not m:
+        return {}, md, False
+
+    raw_yaml = m.group(1)
+    body = md[m.end():]
+    try:
+        meta = yaml.safe_load(raw_yaml) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception:
+        meta = {}
+    return meta, body, True
+
+
+def _iso_datetime_like(val: Any) -> bool:
+    if isinstance(val, datetime):
+        return True
+    if isinstance(val, str):
+        try:
+            datetime.fromisoformat(val)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _is_list_of_str(val: Any, min_len: int = 0, max_len: int | None = None) -> bool:
+    if not isinstance(val, list):
+        return False
+    if any(not isinstance(x, (str, int, float, bool)) for x in val):
+        return False
+    # 문자열화는 허용하되, 길이 체크
+    if len(val) < min_len:
+        return False
+    if max_len is not None and len(val) > max_len:
+        return False
+    return True
+
+
+def validate_diary_front_matter(meta: dict) -> None:
+    """
+    /api/diary/reformat-md 결과물(일기 md) 검증
+    - front-matter 존재
+    - date/time/type/mood/mood_score/tags/summary 등 핵심 필드 검증
+    """
+    # required keys
+    required = ["date", "time", "title", "type", "mood", "mood_score", "tags", "summary"]
+    missing = [k for k in required if k not in meta]
+    if missing:
+        raise ValueError(f"missing keys: {missing}")
+
+    # date format
+    try:
+        datetime.strptime(str(meta["date"]), "%Y-%m-%d")
+    except Exception:
+        raise ValueError("date must be YYYY-MM-DD")
+
+    # time format "HH:MM"
+    if not re.match(r"^\d{2}:\d{2}$", str(meta["time"])):
+        raise ValueError("time must be HH:MM string")
+
+    # type fixed
+    if str(meta["type"]).strip().lower() != "diary":
+        raise ValueError("type must be 'diary'")
+
+    # mood_score range + 1 decimal
+    try:
+        ms = float(meta["mood_score"])
+    except Exception:
+        raise ValueError("mood_score must be a float")
+    if ms < -1.0 or ms > 1.0:
+        raise ValueError("mood_score must be between -1.0 and 1.0")
+    if round(ms, 1) != ms:
+        raise ValueError("mood_score must have at most 1 decimal place")
+
+    # tags 3~7
+    if not _is_list_of_str(meta.get("tags"), min_len=3, max_len=7):
+        raise ValueError("tags must be list with 3~7 items")
+
+    # summary length (너무 짧으면 품질상 실패로 간주)
+    if len(str(meta.get("summary") or "").strip()) < 10:
+        raise ValueError("summary too short")
+
+
+def validate_data_front_matter(meta: dict, doc_type: str) -> None:
+    """
+    /api/data/reformat-md 결과물(idea/work/web_research/bible) 검증
+    """
+    required = ["type", "title", "created_at", "updated_at", "tags", "topics", "people", "locations", "usage", "summary", "source"]
+    missing = [k for k in required if k not in meta]
+    if missing:
+        raise ValueError(f"missing keys: {missing}")
+
+    if str(meta["type"]).strip().lower() != doc_type:
+        raise ValueError(f"type must be '{doc_type}'")
+
+    if not _iso_datetime_like(meta.get("created_at")):
+        raise ValueError("created_at must be ISO datetime")
+    if not _iso_datetime_like(meta.get("updated_at")):
+        raise ValueError("updated_at must be ISO datetime")
+
+    if not _is_list_of_str(meta.get("tags"), min_len=1, max_len=20):
+        raise ValueError("tags must be a list (min 1)")
+    if not _is_list_of_str(meta.get("topics"), min_len=1, max_len=20):
+        raise ValueError("topics must be a list (min 1)")
+    if not _is_list_of_str(meta.get("people"), min_len=0, max_len=30):
+        raise ValueError("people must be a list")
+    if not _is_list_of_str(meta.get("locations"), min_len=0, max_len=30):
+        raise ValueError("locations must be a list")
+    if not _is_list_of_str(meta.get("usage"), min_len=0, max_len=10):
+        raise ValueError("usage must be a list (min 0)")
+
+    # source can be null/None/""/url/text
+    src = meta.get("source")
+    if src is not None and not isinstance(src, (str, dict, list)):
+        raise ValueError("source must be string or null")
+
+
+def validate_plan_front_matter(meta: dict) -> None:
+    required = ["type", "title", "goal", "include", "created_at", "updated_at", "usage", "sources"]
+    missing = [k for k in required if k not in meta]
+    if missing:
+        raise ValueError(f"missing keys: {missing}")
+
+    if str(meta["type"]).strip().lower() != "plan":
+        raise ValueError("type must be 'plan'")
+    if not _iso_datetime_like(meta.get("created_at")):
+        raise ValueError("created_at must be ISO datetime")
+    if not _iso_datetime_like(meta.get("updated_at")):
+        raise ValueError("updated_at must be ISO datetime")
+    if not _is_list_of_str(meta.get("usage"), min_len=1):
+        raise ValueError("usage must be a list (min 1)")
+
+    inc = meta.get("include")
+    if not isinstance(inc, list) or not inc:
+        raise ValueError("include must be a non-empty list")
+
+
+def validate_critique_front_matter(meta: dict) -> None:
+    required = ["type", "object_title", "created_at", "updated_at", "source_object_file", "usage"]
+    missing = [k for k in required if k not in meta]
+    if missing:
+        raise ValueError(f"missing keys: {missing}")
+
+    if str(meta["type"]).strip().lower() != "critique":
+        raise ValueError("type must be 'critique'")
+    if not _iso_datetime_like(meta.get("created_at")):
+        raise ValueError("created_at must be ISO datetime")
+    if not _iso_datetime_like(meta.get("updated_at")):
+        raise ValueError("updated_at must be ISO datetime")
+    if not _is_list_of_str(meta.get("usage"), min_len=1):
+        raise ValueError("usage must be a list (min 1)")
+
+
+async def call_llm_with_front_matter_retry(
+    prompt: str,
+    validate_meta_fn: Callable[[dict], None],
+    retries: int = 2,
+    must_have_front_matter: bool = True,
+) -> str:
+    """
+    LLM이 Markdown을 반환한다고 가정.
+    - front-matter 존재 여부 + meta 검증에 실패하면 재시도
+    - 실패 사유를 다음 프롬프트에 피드백으로 붙임
+    """
+    last_md = ""
+    last_err = ""
+
+    for attempt in range(retries + 1):
+        md = await call_llm(prompt)
+        last_md = md
+
+        meta, body, has_fm = extract_front_matter(md)
+
+        try:
+            if must_have_front_matter and not has_fm:
+                raise ValueError("front-matter is missing. Output must start with YAML front-matter.")
+
+            validate_meta_fn(meta)
+
+            # 통과하면 그대로 반환
+            return md
+
+        except Exception as exc:
+            last_err = str(exc)
+            if attempt >= retries:
+                # 마지막 실패는 원문 그대로 반환하지 말고, 호출자 쪽에서 에러 처리할지 선택 가능
+                raise ValueError(f"LLM output validation failed after retries: {last_err}")
+
+            # 다음 시도용 프롬프트 강화
+            prompt = (
+                prompt
+                + "\n\n"
+                + "[검증 실패 피드백]\n"
+                + f"- 실패 사유: {last_err}\n"
+                + "- 반드시 YAML front-matter를 최상단에 1개만 만들 것.\n"
+                + "- 키 누락/형식 불일치(날짜/시간/score/리스트)를 수정해 재출력할 것.\n"
+                + "- 설명 금지, 최종 Markdown만 출력.\n"
+            )
+
+    # 여기 도달하지 않음
+    return last_md
+
+class DiarySchema(BaseModel):
+    date: str                     # YYYY-MM-DD
+    mood_score: float = Field(
+        ge=-1.0,
+        le=1.0,
+        description="감정 점수 (-1.0 ~ 1.0, 소수점 1자리)"
+    )
+    summary: str
+    body: str
+    tags: List[str]
+
+    @validator("date")
+    def validate_date(cls, v):
+        datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+    @validator("mood_score")
+    def validate_mood_score_precision(cls, v):
+        if round(v, 1) != v:
+            raise ValueError("mood_score must have at most 1 decimal place")
+        return v
 
 
 async def call_llm(prompt: str) -> str:
@@ -1240,16 +1484,15 @@ def build_data_repair_prompt(original_md: str, doc_type: str) -> str:
 
 @app.post("/api/diary/reformat-md", response_model=DiaryReformatResponse)
 async def api_diary_reformat_md(body: DiaryReformatRequest):
-    """
-    기존에 저장된 md(일기)를 입력받아
-    - YAML 메타데이터 보정
-    - 누락 필드 채우기
-    - summary, projects, tags 등을 재추론
-    """
     prompt = build_diary_repair_prompt(body.markdown)
-    new_md = await call_llm(prompt)
-    return DiaryReformatResponse(result=new_md)
 
+    new_md = await call_llm_with_front_matter_retry(
+        prompt=prompt,
+        validate_meta_fn=validate_diary_front_matter,
+        retries=int(os.environ.get("LLM_VALIDATE_RETRIES", "2")),
+        must_have_front_matter=True,
+    )
+    return DiaryReformatResponse(result=new_md)
 
 @app.post("/api/data/reformat-md")
 async def api_data_reformat_md(body: DataReformatRequest):
@@ -1268,15 +1511,16 @@ async def api_data_reformat_md(body: DataReformatRequest):
             error=f"doc_type must be one of {sorted(allowed)}",
         )
 
+
     prompt = build_data_repair_prompt(body.markdown, doc_type)
     try:
-        new_md = await call_llm(prompt)
-        return standard_response(
-            success=True,
-            message="ok",
-            data={"result": new_md},
-            error=None,
+        new_md = await call_llm_with_front_matter_retry(
+            prompt=prompt,
+            validate_meta_fn=lambda meta: validate_data_front_matter(meta, doc_type),
+            retries=int(os.environ.get("LLM_VALIDATE_RETRIES", "2")),
+            must_have_front_matter=True,
         )
+        return standard_response(success=True, message="ok", data={"result": new_md}, error=None)
     except Exception as exc:
         return standard_response(
             success=False,
@@ -1588,6 +1832,19 @@ def _render_sources_list(sources: dict[str, list[str]]) -> str:
             lines.append(f"- {kind}: {path}")
     return "\n".join(lines)
 
+def build_plan_header_yaml(title: str, goal: str, include: list[str], sources: dict[str, list[str]]) -> str:
+    now_iso = datetime.now().isoformat()
+    header = {
+        "type": "plan",
+        "title": title,
+        "goal": goal,
+        "include": include,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "usage": ["planning"],
+        "sources": sources,   # ✅ validate_plan_front_matter의 sources 요구 충족
+    }
+    return "---\n" + yaml.safe_dump(header, allow_unicode=True, sort_keys=False) + "---\n\n"
 
 async def generate_plan_from_data_internal(req: PlanFromDataRequest) -> PlanGenerateResponse:
     req = await _apply_prompt_to_data_request(req)
@@ -1627,29 +1884,29 @@ async def generate_plan_from_data_internal(req: PlanFromDataRequest) -> PlanGene
 
     plan_text = await call_llm(prompt)
 
-    # 사람이 바로 확인할 수 있도록 본문 끝에 참고 소스 목록 추가
+    # (선택) 본문 품질 규칙: 너무 짧으면 재시도 같은 간단 규칙
+    if len(plan_text.strip()) < 500:
+        # 재시도: (프롬프트 강화)
+        plan_text = await call_llm(prompt + "\n\n[품질 기준] 최소 500자 이상, 섹션 구조를 반드시 채워라.")
+
     sources_section = _render_sources_list(sources_dict)
     plan_text_with_sources = f"{plan_text}\n\n---\n{sources_section}"
 
-    # YAML 헤더를 붙여 저장 (V3.1 스펙)
-    created_at = datetime.now().isoformat()
-    normalized_sources = {k: sources_dict.get(k, []) for k in ("diary", "ideas", "web_research", "works", "bible")}
-    yaml_header = {
-        "type": "plan",
-        "title": topic,
-        "goal": topic,
-        "include": includes,
-        "usage": ["planning"],
-        "created_at": created_at,
-        "updated_at": created_at,
-        "tags": [],
-        "topics": [],
-        "people": [],
-        "locations": [],
-        "sources": normalized_sources,
-    }
-    header_str = "---\n" + yaml.safe_dump(yaml_header, allow_unicode=True, sort_keys=False) + "---\n\n"
+    header_str = build_plan_header_yaml(
+        title=req.goal or "단편소설 기획서 제작",
+        goal=req.goal or "단편소설 기획서 제작",
+        include=includes,
+        sources=sources_dict,
+    )
     final_text = header_str + plan_text_with_sources
+
+    final_text = header_str + plan_text_with_sources
+
+    # ✅ 최종 결과(front-matter 포함) 검증
+    meta, _, has_fm = extract_front_matter(final_text)
+    if not has_fm:
+        raise ValueError("plan output missing front-matter (server bug)")
+    validate_plan_front_matter(meta)
 
     file_path = save_plan_output(final_text)
 
@@ -2024,7 +2281,7 @@ def _load_critique_criteria() -> str:
 def _save_critique_object(title: str, content: str) -> str:
     now_iso = datetime.now().isoformat()
     yaml_header = {
-        "type": "objects",
+        "type": "critique_object",
         "title": title,
         "created_at": now_iso,
         "updated_at": now_iso,
@@ -2260,14 +2517,36 @@ async def api_critique(req: CritiqueRequest):
         critique_text = await call_llm(prompt)
 
     critique_path: str | None = None
+
+    # ✅ response에 반환할 critique md(헤더 포함)를 만든다
+    now_iso = datetime.now().isoformat()
+    critique_yaml_header = {
+        "type": "critique",
+        "object_title": req.title,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "source_object_file": work_path,
+        "usage": ["critique"],
+    }
+    critique_md_with_header = "---\n" + yaml.safe_dump(
+        critique_yaml_header, allow_unicode=True, sort_keys=False
+    ) + "---\n\n" + critique_text
+
+    # ✅ 검증 (front-matter + 주요 필드)
+    meta, _, has_fm = extract_front_matter(critique_md_with_header)
+    if not has_fm:
+        raise ValueError("critique output missing front-matter (server bug)")
+    validate_critique_front_matter(meta)
+
     if opts.save_critique or (opts.save_work is True):
+        # 기존 저장 로직 유지 (저장 파일도 동일한 헤더 포함)
         critique_path = _save_critique_result(req.title, critique_text, work_path)
 
     return standard_response(
         success=True,
         message="ok",
         data={
-            "critique": critique_text,
+            "critique": critique_md_with_header,  # ✅ 이제 헤더 포함 md로 반환
             "critique_file_path": critique_path,
             "work_file_path": work_path,
         },

@@ -331,50 +331,7 @@ title: "{title}"
         ]
     ).rstrip()
 
-    # LLM 참고용 원문 (출력 금지)
-    ref = f"""
-<!--
-```text
-{raw_text}
--->
-""".lstrip()
-    return f"{front_matter}\n\n{body}\n{ref}".rstrip() + "\n"
-
-def strip_raw_text_sections(md: str) -> str:
-    """
-    LLM이 실수로 원문 섹션을 출력했을 때 제거한다.
-    - "원본 텍스트" 섹션
-    - "참고용 원문(출력 금지)" 섹션
-    - 해당 섹션의 ```text ... ``` 블록
-    를 보수적으로 삭제.
-    """
-    text = md
-
-    # 1) "## 원본 텍스트 ..." + 다음 ```text ... ``` 제거
-    text = re.sub(
-        r"\n---\n\s*##\s*원본\s*텍스트[^\n]*\n```text\n.*?\n```\n?",
-        "\n",
-        text,
-        flags=re.DOTALL,
-    )
-
-    # 2) "## 참고용 원문(출력 금지) ..." + 다음 ```text ... ``` 제거
-    text = re.sub(
-        r"\n---\n\s*##\s*참고용\s*원문[^\n]*\n```text\n.*?\n```\n?",
-        "\n",
-        text,
-        flags=re.DOTALL,
-    )
-
-    # 3) 헤더만 남고 코드블록이 이어지는 변칙 케이스 방어
-    text = re.sub(
-        r"\n##\s*(원본\s*텍스트|참고용\s*원문)[^\n]*\n```text\n.*?\n```\n?",
-        "\n",
-        text,
-        flags=re.DOTALL,
-    )
-
-    return text.rstrip() + "\n"
+    return f"{front_matter}\n\n{body}".rstrip() + "\n"
 
 def append_raw_text(final_md: str, raw_text: str) -> str:
     """
@@ -429,9 +386,6 @@ def handle_new_file(file_path: Path) -> bool:
             # LLM 실패 시에도 output은 1개만 저장해야 하므로 draft를 대신 사용
             print(f"[WARN] 메타데이터 보정 실패 → draft를 최종으로 사용: {e}")
             refined_md = draft_md
-
-        # LLM이 혹시 원문 섹션을 출력했으면 제거
-        refined_md = strip_raw_text_sections(refined_md)
 
         # 최종 저장 직전에 raw_text를 시스템이 맨 아래에 붙임
         final_md = append_raw_text(refined_md, raw_text)
@@ -569,7 +523,7 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
 class ReuseTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 def start_health_server():
-    with socketserver.TCPServer(("", HEALTH_PORT), HealthHandler) as httpd:
+    with ReuseTCPServer(("", HEALTH_PORT), HealthHandler) as httpd:
         print(f"[INFO] data-format-bot health server started on port {HEALTH_PORT}")
         httpd.serve_forever()
 
