@@ -5,7 +5,8 @@ import httpx
 import subprocess
 from datetime import datetime
 from pathlib import Path
-
+import requests
+import threading
 import psutil  # requirements.txt 에 추가 필요
 
 # -----------------------
@@ -27,6 +28,10 @@ HEALTH_TARGETS = [
 # 환경변수 & 기본 설정
 # -----------------------
 INTERVAL = int(os.getenv("INTERVAL", "60"))  # 초
+
+STATS_URL = "http://data-format-bot:8001/stats"
+STATS_INTERVAL = 300  # 5분
+
 
 # CPU / GPU 임계치 (%)
 CPU_THRESHOLD = float(os.getenv("CPU_THRESHOLD", "80"))
@@ -67,7 +72,16 @@ def log(msg: str, level: str = "INFO"):
             # 로그 파일 에러는 모니터가 죽지 않도록 무시
             pass
 
-
+# -----------------------
+# 0. Stats
+# -----------------------
+def stats_collector_loop():
+    while True:
+        try:
+            requests.get(STATS_URL, timeout=30)
+        except Exception as e:
+            print(f"[stats] failed: {e}")
+        time.sleep(STATS_INTERVAL)
 # -----------------------
 # 1. /health 결과 기반 헬스체크
 # -----------------------
@@ -386,6 +400,9 @@ def main():
     init_known_md_files()
     init_known_critique_files()
 
+    # 5) 데이터 저장
+    threading.Thread(target=stats_collector_loop, daemon=True).start()
+
     while True:
         try:
             log("=" * 30 + " 주기 모니터링 시작 " + "=" * 30, level="INFO")
@@ -402,6 +419,9 @@ def main():
 
             # 4) 신규 합평 원고 파일 감지 -> /api/critique 호출
             check_new_critique_files()
+
+
+
 
         except Exception as e:
             # 모니터 자체에서 잡히지 않은 예외가 터지면 여기서 최종 알림
