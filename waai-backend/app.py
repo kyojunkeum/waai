@@ -1652,8 +1652,8 @@ async def dashboard(
     request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
-    stats_history = load_stats_history(limit=200)
 ):
+    stats_history = load_stats_history(limit=200)
     mood_stats = await get_mood_stats(start_date=start_date, end_date=end_date)
     data_roots = {
         "diary": DIARY_ROOT,
@@ -1673,6 +1673,7 @@ async def dashboard(
             "request": request,
             "user": os.environ.get("DASHBOARD_USER", "guest"),
             "mood_stats": mood_stats,
+            "stats_history": stats_history,
             "data_roots": data_roots,
             "data_files": data_files,
         },

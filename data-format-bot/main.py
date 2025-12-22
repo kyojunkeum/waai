@@ -12,7 +12,7 @@ import http.server
 import socketserver
 import requests
 import yaml
-from typing import Any,Dict,Tuple,Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 
@@ -30,8 +30,6 @@ STATE = {
     "last_error": None,
 }
 
-app = FastAPI()
-
 # =========================
 # Schema score (stats)
 # =========================
@@ -41,106 +39,108 @@ STATS_HISTORY_PATH = STATS_DIR / "stats_history.jsonl"
 STATS_MAX_LINES = int(os.getenv("STATS_MAX_LINES", "2000"))
 
 SCAN_ROOT = Path(os.getenv("SCAN_ROOT","/home/witness/waai/data"))
-TAGS_MIN =int(os.getenv("TAGS_MIN","3"))
-TAGS_MAX =int(os.getenv("TAGS_MAX","7"))
-SUMMARY_MIN_LEN =int(os.getenv("SUMMARY_MIN_LEN","20"))
+TAGS_MIN =int(os.getenv("TAGS_MIN","1"))
+TAGS_MAX =int(os.getenv("TAGS_MAX","10"))
+SUMMARY_MIN_LEN =int(os.getenv("SUMMARY_MIN_LEN","10"))
 
 REQUIRED_DIARY_KEYS = os.getenv(
 "REQUIRED_DIARY_KEYS",
-"type,created_at,title,summary,tags",
+"type,mood_score,title",
 ).split(",")
 
 REQUIRED_DATA_KEYS = os.getenv(
 "REQUIRED_DATA_KEYS",
-"type,created_at,title,summary,tags,source_url",
+"type,title,tags",
 ).split(",")
 
 
-def_extract_front_matter(md_text: str) ->Tuple[Optional[Dict[str,Any]],str]:
-ifnot md_text.startswith("---"):
-returnNone, md_text
-    parts = md_text.split("\n---\n",1)
-iflen(parts) !=2:
-returnNone, md_text
-try:
-        meta = yaml.safe_load(parts[0][3:].strip())or {}
-return meta, parts[1]
-except Exception:
-returnNone, md_text
+def _extract_front_matter(md_text: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    if not md_text.startswith("---"):
+        return None, md_text
+    parts = md_text.split("\n---\n", 1)
+    if len(parts) != 2:
+        return None, md_text
+    try:
+        meta = yaml.safe_load(parts[0][3:].strip())
+        if not isinstance(meta, dict):
+            return None, md_text
+        return meta, parts[1]
+    except Exception:
+        return None, md_text
 
 
-def_doc_kind(meta: Dict[str,Any], path: Path) ->str:
-    t =str(meta.get("type","")).strip()
-if t:
-return t
-if"diary"in path.parts:
-return"diary"
-return"data"
+def _doc_kind(meta: Dict[str, Any], path: Path) -> str:
+    t = str(meta.get("type", "")).strip()
+    if t:
+        return t
+    if "diary" in path.parts:
+        return "diary"
+    return "data"
 
 
-def_validate(meta: Dict[str,Any], kind:str) ->Dict[str,bool]:
-    required = REQUIRED_DIARY_KEYSif kind =="diary"else REQUIRED_DATA_KEYS
+def _validate(meta: Dict[str, Any], kind: str) -> Dict[str, bool]:
+    required = REQUIRED_DIARY_KEYS if kind == "diary" else REQUIRED_DATA_KEYS
 
-    missing_required =any(
-        meta.get(k.strip())in [None,"", []]for kin required
+    missing_required = any(
+        meta.get(k.strip()) in [None, "", []] for k in required
     )
 
     tags = meta.get("tags", [])
-ifisinstance(tags,str):
-        tags = [t.strip()for tin tags.split(",")if t.strip()]
-    tags_violate =not (isinstance(tags,list)and TAGS_MIN <=len(tags) <= TAGS_MAX)
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    tags_violate = not (isinstance(tags, list) and TAGS_MIN <= len(tags) <= TAGS_MAX)
 
-    summary =str(meta.get("summary","")).strip()
-    summary_short =len(summary) < SUMMARY_MIN_LEN
+    summary = str(meta.get("summary", "")).strip()
+    summary_short = len(summary) < SUMMARY_MIN_LEN
 
-return {
-"missing_required": missing_required,
-"tags_violate": tags_violate,
-"summary_short": summary_short,
+    return {
+        "missing_required": missing_required,
+        "tags_violate": tags_violate,
+        "summary_short": summary_short,
     }
 
 
-defscan_and_score(root: Path) ->Dict[str,Any]:
-    md_files =list(root.rglob("*.md"))
+def scan_and_score(root: Path) -> Dict[str, Any]:
+    md_files = list(root.rglob("*.md"))
 
-    total =0
-    no_front_matter =0
-    missing_required =0
-    tags_violate =0
-    summary_short =0
+    total = 0
+    no_front_matter = 0
+    missing_required = 0
+    tags_violate = 0
+    summary_short = 0
 
-for pin md_files:
-try:
+    for p in md_files:
+        try:
             text = p.read_text(encoding="utf-8", errors="ignore")
-except Exception:
-continue
+        except Exception:
+            continue
 
-        total +=1
+        total += 1
         meta, _ = _extract_front_matter(text)
-ifnot meta:
-            no_front_matter +=1
-continue
+        if not meta:
+            no_front_matter += 1
+            continue
 
         kind = _doc_kind(meta, p)
         r = _validate(meta, kind)
 
-if r["missing_required"]:
-            missing_required +=1
-if r["tags_violate"]:
-            tags_violate +=1
-if r["summary_short"]:
-            summary_short +=1
+        if r["missing_required"]:
+            missing_required += 1
+        if r["tags_violate"]:
+            tags_violate += 1
+        if r["summary_short"]:
+            summary_short += 1
 
-defrate(x: int) ->float:
-return0.0if total ==0elseround((x / total) *100,2)
+    def rate(x: int) -> float:
+        return 0.0 if total == 0 else round((x / total) * 100, 2)
 
-return {
-"scan_root":str(root),
-"total_md": total,
-"no_front_matter_pct": rate(no_front_matter),
-"missing_required_pct": rate(missing_required),
-"tags_violate_pct": rate(tags_violate),
-"summary_short_pct": rate(summary_short),
+    return {
+        "scan_root": str(root),
+        "total_md": total,
+        "no_front_matter_pct": rate(no_front_matter),
+        "missing_required_pct": rate(missing_required),
+        "tags_violate_pct": rate(tags_violate),
+        "summary_short_pct": rate(summary_short),
     }
 
 
@@ -550,27 +550,6 @@ def handle_new_file(file_path: Path) -> bool:
         print(f"[ERROR] handle_new_file failed: {e}")
         return False
 
-def strip_raw_text_sections(md: str) -> str:
-    """
-    LLM이 '원본 텍스트(자동 보존)' 섹션이나 ```text 블럭을 포함해 반환하는 경우 제거.
-    (generic 타입은 원문을 YAML/본문에 녹이는 구조라면, 중복 원문 섹션은 제거하는 게 맞음)
-    """
-    if not md:
-        return md
-
-    # 흔한 헤더/구분선 패턴들 기준으로 잘라내기
-    patterns = [
-        r"\n##\s*원본\s*텍스트.*$",              # "## 원본 텍스트..." 이후 제거
-        r"\n##\s*원문.*$",                      # "## 원문..." 이후 제거
-        r"\n#\s*원문\s*초안.*$",                # "# 원문 초안" 이후 제거
-        r"\n```text\s*[\s\S]*?\n```",          # text 코드블럭 제거
-    ]
-
-    out = md
-    for pat in patterns:
-        out = re.sub(pat, "", out, flags=re.IGNORECASE)
-
-    return out.strip() + "\n"
 
 def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
     if file_path.suffix.lower() != ".txt":
@@ -585,7 +564,6 @@ def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
         draft_md = build_initial_md(doc_type, title, raw_text)
         formatted_md = call_llm_for_data_reformat(doc_type, draft_md)
         formatted_md = sanitize_markdown(formatted_md, header_yaml)
-        formatted_md = strip_raw_text_sections(formatted_md)
     except Exception as e:
         update_state_on_error(e)
         print(f"[ERROR] LLM 호출 실패 ({doc_type}): {e}")
@@ -651,6 +629,26 @@ def scan_generic(processed_map: dict[str, set[str]]) -> dict[str, set[str]]:
 # -----------------------------
 class HealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/stats":
+            try:
+                stats = scan_and_score(SCAN_ROOT)
+                append_stats_history(stats)
+                body_bytes = json.dumps(stats, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+            except Exception as e:
+                err_body = {"error": "stats_failed", "detail": str(e)}
+                body_bytes = json.dumps(err_body, ensure_ascii=False).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+            return
+
         if self.path != "/health":
             self.send_response(404)
             self.end_headers()
@@ -688,11 +686,6 @@ def start_health_server():
     with ReuseTCPServer(("", HEALTH_PORT), HealthHandler) as httpd:
         print(f"[INFO] data-format-bot health server started on port {HEALTH_PORT}")
         httpd.serve_forever()
-
-@app.get("/stats")
-defstats():
-append_stats_history(stats)
-return scan_and_score(SCAN_ROOT)
 
 # -----------------------------
 # 메인

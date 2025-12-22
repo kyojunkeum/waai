@@ -162,6 +162,8 @@ services:
   data-format-bot:
     build: ./data-format-bot
     container_name: data-format-bot
+    ports:
+      - "8001:8001"
     environment:
       - SCAN_ROOT=/home/witness/waai/data
       - LLM_FIX_URL=http://waai-backend:8000/api/diary/reformat-md

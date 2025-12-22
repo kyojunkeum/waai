@@ -42,11 +42,15 @@
     </div>
   </div>
 
-  <h2>정제 품질 추이 (최근 200회)</h2>
-
 {% if not stats_history or stats_history|length == 0 %}
   <p>(stats 기록이 없습니다. data-format-bot의 /stats 호출이 누적되면 표시됩니다.)</p>
 {% else %}
+  <div class="card">
+    <h2>정제 품질 추이 그래프 (최근 200회)</h2>
+    <canvas id="qualityChart" width="900" height="320"></canvas>
+  </div>
+
+  <h2>정제 품질 추이 (최근 200회)</h2>
   <table border="1" cellpadding="6" cellspacing="0">
     <thead>
       <tr>
@@ -122,6 +126,78 @@
         }
       }
     });
+
+    const statsHistory = {{ stats_history | tojson | safe }};
+    if (statsHistory && statsHistory.length) {
+      const qualityData = [...statsHistory];
+      const qualityLabels = qualityData.map(s => s.time || '');
+      const noFrontMatter = qualityData.map(s => Number(s.no_front_matter_pct) || 0);
+      const missingRequired = qualityData.map(s => Number(s.missing_required_pct) || 0);
+      const tagsViolate = qualityData.map(s => Number(s.tags_violate_pct) || 0);
+      const summaryShort = qualityData.map(s => Number(s.summary_short_pct) || 0);
+      const totalMd = qualityData.map(s => Number(s.total_md) || 0);
+
+      const qctx = document.getElementById('qualityChart').getContext('2d');
+      const qualityChart = new Chart(qctx, {
+        type: 'line',
+        data: {
+          labels: qualityLabels,
+          datasets: [
+            {
+              label: 'no_front_matter_pct',
+              data: noFrontMatter,
+              borderWidth: 2,
+              tension: 0.15
+            },
+            {
+              label: 'missing_required_pct',
+              data: missingRequired,
+              borderWidth: 2,
+              tension: 0.15
+            },
+            {
+              label: 'tags_violate_pct',
+              data: tagsViolate,
+              borderWidth: 2,
+              tension: 0.15
+            },
+            {
+              label: 'summary_short_pct',
+              data: summaryShort,
+              borderWidth: 2,
+              tension: 0.15
+            },
+            {
+              label: 'total_md',
+              data: totalMd,
+              borderWidth: 1,
+              borderDash: [6, 6],
+              tension: 0.15,
+              yAxisID: 'y1'
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          scales: {
+            y: {
+              title: { display: true, text: 'Percent (%)' },
+              beginAtZero: true
+            },
+            y1: {
+              position: 'right',
+              title: { display: true, text: 'total_md' },
+              beginAtZero: true,
+              grid: { drawOnChartArea: false }
+            }
+          }
+        }
+      });
+    }
   </script>
 
 </body>
