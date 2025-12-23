@@ -267,18 +267,19 @@ def save_processed_records(record_path: Path, processed_set):
 
 def parse_metadata_from_filename(file_path: Path):
     """
-    예: 2025-12-09_23-15_tags1-tags2.txt
+    예: 2025-12-09_23-15_제목_추가정보.txt
     방어:
     - date가 YYYY-MM-DD 아니면 오늘 날짜로 fallback
-    - time이 HH-MM or HH:MM 아니면 00:00 fallback
-    - title이 없으면 stem 전체 사용
+    - time이 HH-MM / HH:MM / HHMM 일부 허용, 아니면 00:00 fallback
+    - title은 3번째 토큰부터 끝까지 join 해서 최대한 보존
     """
     name = file_path.stem
-    parts = name.split("_", 3)
+    parts = name.split("_")
 
     date_raw = parts[0] if len(parts) > 0 else ""
     time_raw = parts[1] if len(parts) > 1 else ""
-    title_raw = parts[2] if len(parts) > 2 else name
+    # ✅ 핵심: title은 3번째 이후 전부 합쳐서 보존
+    title_raw = "_".join(parts[2:]).strip() if len(parts) > 2 else name
 
     # date 검증
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_raw):
@@ -384,12 +385,22 @@ def ensure_unique_path(directory: Path, filename: str) -> Path:
 # -----------------------------
 
 def build_initial_yaml(doc_type: str, title: str) -> str:
-    now_iso = datetime.now().isoformat()
+    now = datetime.now()
+    now_iso = now.isoformat(timespec="seconds")
+
     yaml_obj = {
         "type": doc_type,
         "title": title,
+
+        # ✅ 시스템 메타 (유지)
         "created_at": now_iso,
         "updated_at": now_iso,
+
+        # ✅ diary 의미 메타 (파생 생성)
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M"),
+
+        # 공통 필드
         "tags": [],
         "topics": [],
         "people": [],
@@ -398,6 +409,7 @@ def build_initial_yaml(doc_type: str, title: str) -> str:
         "usage": [],
         "summary": "",
     }
+
     return yaml.safe_dump(yaml_obj, allow_unicode=True, sort_keys=False)
 
 
@@ -413,22 +425,61 @@ def build_initial_md(doc_type: str, title: str, raw_text: str) -> str:
 def sanitize_markdown(md_text: str, header_yaml: str) -> str:
     """
     - '---' 이전에 붙는 설명/주석 제거
-    - YAML 프론트매터가 없으면 초기 헤더를 추가
+    - YAML 프론트매터가 없으면 header_yaml 추가
+    - YAML 프론트매터가 있으면 header_yaml 기준으로 merge하여
+      date/time 같은 핵심 메타가 유지/주입되도록 보장
     """
-    text = md_text.strip()
+    text = (md_text or "").strip()
     if not text:
         return f"---\n{header_yaml}---\n"
 
     # LLM이 실수로 빈 프론트매터(--- 후 바로 ---)를 붙이는 경우 제거
     text = re.sub(r"^\s*---\s*\r?\n\s*---\s*", "---\n", text)
 
+    # 첫 '---' 이전 제거
     idx = text.find("---")
     if idx == -1:
         return f"---\n{header_yaml}---\n\n{text}"
-
-    # 첫 번째 '---'부터 시작하도록 앞부분 제거
     text = text[idx:]
-    return text
+
+    # 프론트매터 블록 추출
+    m = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)$", text, flags=re.DOTALL)
+    if not m:
+        # 형식이 애매하면 그냥 header_yaml로 감싸서 안전하게
+        return f"---\n{header_yaml}---\n\n{text}"
+
+    fm_text = m.group(1)
+    body = m.group(2) or ""
+
+    # YAML 파싱
+    try:
+        base = yaml.safe_load(header_yaml) or {}
+    except Exception:
+        base = {}
+
+    try:
+        current = yaml.safe_load(fm_text) or {}
+    except Exception:
+        current = {}
+
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(current, dict):
+        current = {}
+
+    # 1) 기본은 base(스키마/기본값) 위에 current(LLM결과)를 얹는다 => LLM 값 우선
+    merged = {**base, **current}
+
+    # 2) 하지만 diary 핵심 메타는 header_yaml 값으로 "강제" (원하면 목록 수정)
+    FORCE_KEYS = {"type", "title", "date", "time"}
+    for k in FORCE_KEYS:
+        if k in base:
+            merged[k] = base[k]
+
+    # YAML 재직렬화
+    new_fm = yaml.safe_dump(merged, allow_unicode=True, sort_keys=False).rstrip()
+
+    return f"---\n{new_fm}\n---\n\n{body.lstrip()}"
 
 
 def call_llm_for_data_reformat(doc_type: str, md_text: str) -> str:
@@ -443,13 +494,14 @@ def call_llm_for_data_reformat(doc_type: str, md_text: str) -> str:
 def build_draft_md(date: str, time_str: str, title: str, raw_text: str) -> str:
     raw_text = raw_text.rstrip("\n")
 
-    # title / time_str 등은 yaml이 안전하게 quoting 처리하도록 맡김
-    header_obj = {
-        "type": "diary",
-        "date": date,
-        "time": str(time_str),
-        "title": str(title),
-    }
+    # ✅ 2번 핵심: draft도 build_initial_yaml 스키마 기반으로 헤더를 만든다
+    base_header_yaml = build_initial_yaml("diary", title)
+
+    # yaml 문자열 → dict 로드 → date/time 주입 → 다시 yaml로 dump
+    header_obj = yaml.safe_load(base_header_yaml) or {}
+    header_obj["date"] = date
+    header_obj["time"] = str(time_str)
+
     header_yaml = yaml.safe_dump(header_obj, allow_unicode=True, sort_keys=False).rstrip()
 
     body = "\n".join(
@@ -505,39 +557,45 @@ def call_llm_for_reformat(md_text: str) -> str:
     
   
 def handle_new_file(file_path: Path) -> bool:
-    # 새 텍스트 파일 생성 여부 확인
+    # diary 전용(.txt) — handle_new_generic_file 흐름(단일 try/except + 선 header_yaml + sanitize)을 따라가되,
+    # diary는 "output 1개만 저장" 요구가 있어서 LLM 실패 시 draft로 폴백(=기존 정책) 유지.
     if file_path.suffix.lower() != ".txt":
         return False
+
     print(f"[INFO] New file detected: {file_path}")
 
     try:
+        # 1) 파일명 메타 파싱 + 원문 로드
         date, time_str, title = parse_metadata_from_filename(file_path)
         raw_text = file_path.read_text(encoding="utf-8")
 
-        # 1차: draft 생성 (최소 메타 + 본문 골격)  ※ 디스크 저장 X
+        # 2) draft (내부에서 build_initial_yaml + date/time 주입)
         draft_md = build_draft_md(date, time_str, title, raw_text)
 
-        # 2차: LLM 호출하여 메타데이터/본문 정제 (raw_text 없음)
+        # 3) sanitize 기준 헤더(동일 스키마)
+        header_yaml = build_initial_yaml("diary", title)
+
+        # 4) LLM 정제 → sanitize (generic과 동일한 순서)
         try:
             refined_md = call_llm_for_reformat(draft_md)
-            header_yaml = build_initial_yaml("diary", title)
             refined_md = sanitize_markdown(refined_md, header_yaml)
             print("[INFO] Metadata refined by LLM")
         except Exception as e:
-            # LLM 실패 시에도 output은 1개만 저장해야 하므로 draft를 대신 사용
-            print(f"[WARN] 메타데이터 보정 실패 → draft를 최종으로 사용: {e}")
-            refined_md = draft_md
+            # diary는 "output은 1개만" 정책 때문에 LLM 실패 시에도 draft를 최종으로 저장
+            # (generic처럼 그냥 False로 끝내면 txt가 남고 다음 워치에서 재처리될 수 있음)
+            print(f"[WARN] LLM 호출 실패(diary) → draft로 폴백: {e}")
+            refined_md = sanitize_markdown(draft_md, header_yaml)
 
-        # 최종 저장 직전에 raw_text를 시스템이 맨 아래에 붙임
+        # 5) 최종 저장 직전에 raw_text를 시스템이 맨 아래에 붙임
         final_md = append_raw_text(refined_md, raw_text)
 
-        # 저장 (output에는 최종 파일 1개만)
+        # 6) 저장 (output에는 최종 파일 1개만)
         out_name = make_output_filename(date, time_str, file_path.stem)
         out_path = ensure_unique_path(DIARY_OUTPUT_DIR, out_name)
         out_path.write_text(final_md, encoding="utf-8")
         print(f"[INFO] Saved formatted diary: {out_path}")
 
-        # 원본 txt 이동
+        # 7) 원본 txt 이동
         processed_path = DIARY_PROCESSED_DIR / file_path.name
         shutil.move(str(file_path), str(processed_path))
         print(f"[INFO] Moved original to: {processed_path}")

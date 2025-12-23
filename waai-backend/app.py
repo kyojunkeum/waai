@@ -1517,7 +1517,6 @@ def build_diary_repair_prompt(original_md: str) -> str:
    - people: 등장 인물/관계 리스트
    - location: home, office, cafe, outdoor 등
    - type: diary
-   - projects: [\"소설아이디어\",\"NGO\",\"IT\",\"가족\"] 중 가장 관련 있는 것 1~2개
    - scene_potential: 소설 장면으로 쓸 만하면 true, 아니면 false
    - summary: 이 일기를 한 문장으로 요약한 한국어 문장
    - mood / mood_score 가 이미 YAML에 있을 경우 값은 절대 변경하거나 삭제하지 말고 그대로 둔다.
@@ -2257,7 +2256,7 @@ async def web_search_fetch(req: WebSearchFetchRequest):
     saved: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
 
-    for ok, err in results:
+    for ok, err in results:F
         if ok:
             saved.append(ok)
             logger.info("[web_search_fetch] saved title=%s path=%s", ok.get("title", ""), ok.get("file_path", ""))
@@ -2272,96 +2271,6 @@ async def web_search_fetch(req: WebSearchFetchRequest):
         data={"query": query, "saved": saved, "failed": failed},
         error=None if saved or not failed else "all_failed",
     )
-
-
-# =========================
-# 🌐 Playwright 웹리서치 스케줄러
-# =========================
-
-_playwright_logs: deque[dict[str, Any]] = deque(maxlen=30)
-_playwright_scheduler_task: asyncio.Task | None = None
-
-
-def _load_playwright_schedule() -> PlaywrightScheduleConfig:
-    if PLAYWRIGHT_SCHEDULE_PATH.exists():
-        try:
-            data = json.loads(PLAYWRIGHT_SCHEDULE_PATH.read_text(encoding="utf-8"))
-            return PlaywrightScheduleConfig(**data)
-        except Exception:
-            pass
-    return PlaywrightScheduleConfig()
-
-
-def _save_playwright_schedule(cfg: PlaywrightScheduleConfig):
-    PLAYWRIGHT_SCHEDULE_PATH.write_text(cfg.model_dump_json(ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _log_playwright_run(kind: str, keywords: list[str], count: int, saved: list[str], error: str | None = None):
-    _playwright_logs.appendleft(
-        {
-            "time": datetime.now().isoformat(),
-            "kind": kind,
-            "keywords": keywords,
-            "count": count,
-            "saved_files": saved[:5],
-            "error": error,
-        }
-    )
-
-
-async def _playwright_scheduler_loop():
-    while True:
-        cfg = _load_playwright_schedule()
-        if cfg.enabled and cfg.keywords:
-            payload = {
-                "keywords": cfg.keywords[:5],
-                "perKeyword": max(1, min(cfg.per_keyword, 5)),
-            }
-            data = await _call_playwright_crawl(payload)
-            now_iso = datetime.now().isoformat()
-            if data is None:
-                cfg.last_run = now_iso
-                cfg.last_error = "playwright call failed"
-                cfg.last_count = 0
-                _log_playwright_run("schedule", payload["keywords"], 0, [], cfg.last_error)
-            else:
-                saved = data.get("saved_files") or data.get("savedFiles") or []
-                count = data.get("count") or len(saved)
-                cfg.last_run = now_iso
-                cfg.last_error = None
-                cfg.last_count = count
-                _log_playwright_run("schedule", payload["keywords"], count, saved, None)
-            _save_playwright_schedule(cfg)
-
-        interval = max(1, cfg.interval_minutes) * 60
-        await asyncio.sleep(interval)
-
-
-@app.on_event("startup")
-async def _start_playwright_scheduler():
-    global _playwright_scheduler_task
-    if _playwright_scheduler_task is None:
-        _playwright_scheduler_task = asyncio.create_task(_playwright_scheduler_loop())
-
-
-@app.get("/api/playwright/schedule", response_model=dict, operation_id="get_playwright_schedule")
-async def get_playwright_schedule():
-    cfg = _load_playwright_schedule()
-    return standard_response(success=True, message="ok", data=cfg.dict(), error=None)
-
-
-@app.post("/api/playwright/schedule", response_model=dict, operation_id="set_playwright_schedule")
-async def set_playwright_schedule(cfg: PlaywrightScheduleConfig):
-    cfg.interval_minutes = max(1, cfg.interval_minutes)
-    cfg.per_keyword = max(1, min(cfg.per_keyword, 5))
-    cfg.keywords = [k.strip() for k in cfg.keywords if k and k.strip()][:5]
-    _save_playwright_schedule(cfg)
-    return standard_response(success=True, message="saved", data=cfg.dict(), error=None)
-
-
-@app.get("/api/playwright/status", response_model=dict, operation_id="get_playwright_status")
-async def get_playwright_status():
-    return standard_response(success=True, message="ok", data=list(_playwright_logs), error=None)
 
 
 # =========================
