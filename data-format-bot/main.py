@@ -287,68 +287,6 @@ def save_processed_records(record_path: Path, processed_set):
 # 파일명 파싱 / LLM 호출
 # -----------------------------
 
-def parse_metadata_from_filename(file_path: Path):
-    """
-    예: 2025-12-09_23-15_제목_추가정보.txt
-    방어:
-    - date가 YYYY-MM-DD 아니면 오늘 날짜로 fallback
-    - time이 HH-MM / HH:MM / HHMM 일부 허용, 아니면 00:00 fallback
-    - title은 3번째 토큰부터 끝까지 join 해서 최대한 보존
-    """
-    name = file_path.stem
-    parts = name.split("_")
-
-    date_raw = parts[0] if len(parts) > 0 else ""
-    time_raw = parts[1] if len(parts) > 1 else ""
-    # ✅ 핵심: title은 3번째 이후 전부 합쳐서 보존
-    title_raw = "_".join(parts[2:]).strip() if len(parts) > 2 else name
-
-    # date 검증
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_raw):
-        date = date_raw
-    else:
-        date = datetime.now().strftime("%Y-%m-%d")
-
-    # time 정규화: "23-15" / "23:15" / "2315" 일부 허용
-    time_formatted = "00:00"
-    if time_raw:
-        t = time_raw.replace("-", ":")
-        if re.fullmatch(r"\d{2}:\d{2}", t):
-            hh, mm = t.split(":")
-            if 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59:
-                time_formatted = f"{hh}:{mm}"
-        elif re.fullmatch(r"\d{4}", time_raw):
-            hh, mm = time_raw[:2], time_raw[2:]
-            if 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59:
-                time_formatted = f"{hh}:{mm}"
-
-    # title 정리
-    title = (title_raw or name).replace("-", " ").strip() or "diary"
-
-    return date, time_formatted, title
-
-
-def extract_tags_from_md(md_text: str):
-    """
-    md_text 안에서 'tags: [ ... ]' 라인을 찾아 리스트로 파싱.
-    예: tags: [아내, 빚, 회복, 신앙, 가족]
-    """
-    for line in md_text.splitlines():
-        striped = line.strip()
-        if striped.startswith("tags:"):
-            start = striped.find("[")
-            end = striped.find("]", start)
-            if start != -1 and end != -1:
-                inner = striped[start + 1 : end]
-                parts = [
-                    p.strip().strip("'\"")
-                    for p in inner.split(",")
-                    if p.strip()
-                ]
-                return parts
-    return []
-
-
 def slugify(text: str) -> str:
     """
     파일명용 slug: 공백 제거, 위험한 문자 치환.
@@ -513,16 +451,14 @@ def call_llm_for_data_reformat(doc_type: str, md_text: str) -> str:
         raise RuntimeError(data.get("error") or "reformat failed")
     return data["data"]["result"]
 
-def build_draft_md(date: str, time_str: str, title: str, raw_text: str) -> str:
+def build_draft_md(raw_text: str) -> str:
     raw_text = raw_text.rstrip("\n")
 
     # ✅ 2번 핵심: draft도 build_initial_yaml 스키마 기반으로 헤더를 만든다
-    base_header_yaml = build_initial_yaml("diary", title)
+    base_header_yaml = build_initial_yaml("diary")
 
     # yaml 문자열 → dict 로드 → date/time 주입 → 다시 yaml로 dump
     header_obj = yaml.safe_load(base_header_yaml) or {}
-    header_obj["date"] = date
-    header_obj["time"] = str(time_str)
 
     header_yaml = yaml.safe_dump(header_obj, allow_unicode=True, sort_keys=False).rstrip()
 
@@ -583,22 +519,18 @@ def handle_new_file(file_path: Path) -> bool:
     # diary는 "output 1개만 저장" 요구가 있어서 LLM 실패 시 draft로 폴백(=기존 정책) 유지.
     if file_path.suffix.lower() != ".txt":
         return False
-
-    print(f"[INFO] New file detected: {file_path}")
+    doc_type = "diary"
+    print(f"[INFO] Ne0w file detected: {file_path}")
 
     try:
-        # 1) 파일명 메타 파싱 + 원문 로드
-        date, time_str, title = parse_metadata_from_filename(file_path)
+        # 1) 원문 로드
         raw_text = file_path.read_text(encoding="utf-8")
-
-        # 2) draft (내부에서 build_initial_yaml + date/time 주입)
-        draft_md = build_draft_md(date, time_str, title, raw_text)
-
-        # 3) sanitize 기준 헤더(동일 스키마)
-        header_yaml = build_initial_yaml("diary", title)
-
-        # 4) LLM 정제 → sanitize (generic과 동일한 순서)
+        title = file_path.stem.replace("-", " ").strip() or doc_type
+        header_yaml = build_initial_yaml(doc_type, title)
+ 
+        # 2) LLM 정제 → sanitize (generic과 동일한 순서)
         try:
+            draft_md = build_draft_md(doc_type, title, raw_text)
             refined_md = call_llm_for_reformat(draft_md)
             refined_md = sanitize_markdown(refined_md, header_yaml)
             print("[INFO] Metadata refined by LLM")
@@ -606,13 +538,12 @@ def handle_new_file(file_path: Path) -> bool:
             # diary는 "output은 1개만" 정책 때문에 LLM 실패 시에도 draft를 최종으로 저장
             # (generic처럼 그냥 False로 끝내면 txt가 남고 다음 워치에서 재처리될 수 있음)
             print(f"[WARN] LLM 호출 실패(diary) → draft로 폴백: {e}")
-            refined_md = sanitize_markdown(draft_md, header_yaml)
 
         # 5) 최종 저장 직전에 raw_text를 시스템이 맨 아래에 붙임
         final_md = append_raw_text(refined_md, raw_text)
 
         # 6) 저장 (output에는 최종 파일 1개만)
-        out_name = make_output_filename(date, time_str, file_path.stem)
+        out_name = make_generic_output_filename(doc_type, title)
         out_path = ensure_unique_path(DIARY_OUTPUT_DIR, out_name)
         out_path.write_text(final_md, encoding="utf-8")
         print(f"[INFO] Saved formatted diary: {out_path}")
