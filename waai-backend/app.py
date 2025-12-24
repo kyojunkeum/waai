@@ -2256,7 +2256,7 @@ async def web_search_fetch(req: WebSearchFetchRequest):
     saved: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
 
-    for ok, err in results:F
+    for ok, err in results:
         if ok:
             saved.append(ok)
             logger.info("[web_search_fetch] saved title=%s path=%s", ok.get("title", ""), ok.get("file_path", ""))

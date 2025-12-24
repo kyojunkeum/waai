@@ -38,7 +38,27 @@ STATS_DIR = Path(os.getenv("STATS_DIR", "/home/witness/waai/data/_stats"))
 STATS_HISTORY_PATH = STATS_DIR / "stats_history.jsonl"
 STATS_MAX_LINES = int(os.getenv("STATS_MAX_LINES", "2000"))
 
-SCAN_ROOT = Path(os.getenv("SCAN_ROOT","/home/witness/waai/data"))
+DEFAULT_SCAN_ROOTS = [
+    "/home/witness/waai/data/diary",
+    "/home/witness/waai/data/ideas",
+    "/home/witness/waai/data/works",
+    "/home/witness/waai/data/bible",
+    "/home/witness/waai/data/web_research",
+]
+
+
+def _parse_scan_roots() -> list[Path]:
+    raw_roots = os.getenv("SCAN_ROOTS")
+    if raw_roots:
+        roots = [r.strip() for r in raw_roots.split(",") if r.strip()]
+        return [Path(r) for r in roots]
+    legacy_root = os.getenv("SCAN_ROOT")
+    if legacy_root:
+        return [Path(legacy_root)]
+    return [Path(r) for r in DEFAULT_SCAN_ROOTS]
+
+
+SCAN_ROOTS = _parse_scan_roots()
 TAGS_MIN =int(os.getenv("TAGS_MIN","1"))
 TAGS_MAX =int(os.getenv("TAGS_MAX","10"))
 SUMMARY_MIN_LEN =int(os.getenv("SUMMARY_MIN_LEN","10"))
@@ -100,8 +120,10 @@ def _validate(meta: Dict[str, Any], kind: str) -> Dict[str, bool]:
     }
 
 
-def scan_and_score(root: Path) -> Dict[str, Any]:
-    md_files = list(root.rglob("*.md"))
+def scan_and_score(roots: list[Path]) -> Dict[str, Any]:
+    md_files = []
+    for root in roots:
+        md_files.extend(root.rglob("*.md"))
 
     total = 0
     no_front_matter = 0
@@ -135,7 +157,7 @@ def scan_and_score(root: Path) -> Dict[str, Any]:
         return 0.0 if total == 0 else round((x / total) * 100, 2)
 
     return {
-        "scan_root": str(root),
+        "scan_roots": [str(r) for r in roots],
         "total_md": total,
         "no_front_matter_pct": rate(no_front_matter),
         "missing_required_pct": rate(missing_required),
@@ -689,7 +711,7 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/stats":
             try:
-                stats = scan_and_score(SCAN_ROOT)
+                stats = scan_and_score(SCAN_ROOTS)
                 append_stats_history(stats)
                 body_bytes = json.dumps(stats, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)

@@ -165,7 +165,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - SCAN_ROOT=/home/witness/waai/data
+      - SCAN_ROOTS=/home/witness/waai/data/diary,/home/witness/waai/data/ideas,/home/witness/waai/data/works,/home/witness/waai/data/bible,/home/witness/waai/data/web_research
       - LLM_FIX_URL=http://waai-backend:8000/api/diary/reformat-md
       - DATA_REFORMAT_URL=http://waai-backend:8000/api/data/reformat-md
       - DIARY_INPUT_DIR=/home/witness/memory/diary
