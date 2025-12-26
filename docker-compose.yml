@@ -1,28 +1,12 @@
 
 services:
-  litellm:
-    image: ghcr.io/berriai/litellm:main
-    container_name: litellm
-    entrypoint: ["litellm"]
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
-    ports:
-      - "4000:4000"
-    volumes:
-      - ./litellm/config.yaml:/app/config.yaml:ro
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    depends_on:
-      - ollama
-    networks:
-      - waai-net
-    restart: unless-stopped
-
   ollama:
     image: ollama/ollama
     container_name: ollama
     # GPU 설정: nvidia-container-toolkit 설치되어 있어야 동작
     volumes:
       - ollama-data:/root/.ollama
+      - ./ollama/modelfiles:/modelfiles:ro
     deploy:
       resources:
         reservations:
@@ -47,12 +31,14 @@ services:
       WEB_RESEARCH_ROOT: "/data/web_research"
       WORKS_ROOT: "/data/works"
       BIBLE_ROOT: "/data/bible"
+      MONITOR_LOG_DIR: "/data/_logs"
     volumes:
       - ./data/diary:/data/diary
       - ./data/ideas:/data/ideas
       - ./data/web_research:/data/web_research
       - ./data/works:/data/works
       - ./data/bible:/data/bible
+      - ./data/_logs:/data/_logs
     networks:
       - waai-net
     restart: unless-stopped
@@ -66,14 +52,9 @@ services:
       WEB_RESEARCH_ROOT: "/data/web_research"
       WORKS_ROOT: "/data/works"
       BIBLE_ROOT: "/data/bible"
-      LLM_BACKEND: "ollama"
       OLLAMA_URL: "http://ollama:11434"
-      MODEL_NAME: "qwen2:7b"
+      OLLAMA_REFINE_MODEL: "qwen2.5-refine-ko:latest"
 
-      # openai 용
-      # OPENAI_BASE_URL: "https://api.openai.com/v1"
-      # OPENAI_API_KEY: "..."
-      # OPENAI_MODEL: "gpt-4.1-mini"
 
     volumes:
       - ./data/diary:/data/diary
@@ -99,8 +80,10 @@ services:
     environment:
       - OUTPUT_DIR=/home/witness/memory/webresearch
       - HEADLESS=1
+      - MONITOR_LOG_DIR=/data/_logs
     volumes:
       - /home/witness/memory/webresearch:/home/witness/memory/webresearch
+      - ./data/_logs:/data/_logs
     networks:
       - waai-net
     restart: unless-stopped
@@ -111,16 +94,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # ✅ LiteLLM로 우회하도록 변경
-      LLM_BACKEND: "openai"
-      OPENAI_BASE_URL: "http://litellm:4000/v1"
-      OPENAI_MODEL: "qwen2_7b_ollama"
-      # 프록시가 OpenAI로도 나갈 수 있게(선택) 키 전달
-      # (Ollama만 쓸 거면 없어도 되지만 보통 두는 편)
-      OPENAI_API_KEY: "dummy-key"
+      OLLAMA_REFINE_MODEL: "qwen2.5-refine-ko:latest"
+      OLLAMA_CREATIVE_MODEL: "qwen2-creative-ko:latest"
+      OLLAMA_BRAINSTORM_MODEL: "qwen2-brainstorm-ko:latest"
       OLLAMA_URL: "http://ollama:11434"
-      #MODEL_NAME: "llama3.1"
-      MODEL_NAME: "qwen2:7b"
       OUTPUT_ROOT: "/data/outputs"
       CRITIQUE_OBJECTS_ROOT: "/data/critique/objects"
       CRITIQUE_RESULTS_ROOT: "/data/critique/results"
@@ -133,19 +110,24 @@ services:
       BIBLE_ROOT: "/data/bible"
       PLAYWRIGHT_MCP_URL: "http://mcp-playwright:7003"
       STATS_HISTORY_PATH: "/data/_stats/stats_history.jsonl"
+      MONITOR_LOG_DIR: "/data/_logs"
+      OPEN_WEBUI_DB_PATH: "/openwebui/data/webui.db"
     volumes:
       - ./data/_stats:/data/_stats
+      - ./data/_logs:/data/_logs
       - ./data/outputs:/data/outputs
       - ./data/diary:/data/diary
       - ./data/ideas:/data/ideas
+      - /home/witness/data/chat:/home/witness/data/chat
+      - /home/witness/memory/ideas:/home/witness/memory/ideas
       - ./data/web_research:/data/web_research
       - ./data/works:/data/works
       - ./data/bible:/data/bible
       - ./data/critique:/data/critique
       - /home/witness/memory/webresearch:/memory/webresearch
+      - openwebui-data:/openwebui/data:ro
     depends_on:
       - ollama
-      - litellm
       - mcp-filesystem
       - mcp-bridge
       - mcp-playwright
@@ -173,12 +155,14 @@ services:
       - MULTI_BASE_OUTPUT=/home/witness/waai/data
       - IGNORE_PROCESSED=true
       - STATS_DIR=/home/witness/waai/data/_stats
+      - MONITOR_LOG_DIR=/data/_logs
     volumes:
       - /home/witness/memory/diary:/input
       - ./data/diary:/output
       - /home/witness/memory:/home/witness/memory
       - ./data:/home/witness/waai/data
       - ./data/_stats:/home/witness/waai/data/_stats
+      - ./data/_logs:/data/_logs
     depends_on:
       - waai-backend
     networks:
@@ -200,18 +184,24 @@ services:
       - MCP_HEALTH=http://mcp-bridge:7002/health
       - MCP_FS_HEALTH=http://mcp-filesystem:7001/health
       - DIARY_BOT_HEALTH=http://data-format-bot:8001/health
-      - INTERVAL=60
+      - TICK_INTERVAL=5
+      - HEALTH_INTERVAL=30
+      - RESOURCE_INTERVAL=30
+      - FILE_INTERVAL=10
+      - MODULE_LOG_INTERVAL=5
       - CPU_THRESHOLD=80
       - GPU_THRESHOLD=80
       - DIARY_DIR=/waai/data/diary
       - CRITIQUE_INBOX_DIR=/home/witness/waai/data/objects
       - CRITIQUE_API_URL=http://waai-backend:8000/api/critique
+      - MONITOR_LOG_DIR=/data/_logs
     depends_on:
       - waai-backend
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data/diary:/waai/data/diary:ro
       - /home/witness/waai/data/objects:/home/witness/waai/data/objects:ro
+      - ./data/_logs:/data/_logs
     networks:
       - waai-net
     restart: unless-stopped

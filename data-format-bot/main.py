@@ -15,9 +15,26 @@ import yaml
 from typing import Any, Dict, Optional, Tuple
 
 
-
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8001"))    # /health port
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "10"))  # 초 단위
+MONITOR_LOG_DIR = Path(os.getenv("MONITOR_LOG_DIR", "/data/_logs"))
+MONITOR_LOG_FILE = MONITOR_LOG_DIR / "data-format-bot.jsonl"
+
+
+def monitor_log(category: str, message: str, payload: Dict[str, Any] | None = None) -> None:
+    record = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "module": "data-format-bot",
+        "category": category,
+        "message": message,
+        "payload": payload or {},
+    }
+    try:
+        MONITOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with MONITOR_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 # -----------------------------
 # 헬스 상태 전역 변수
@@ -444,18 +461,37 @@ def sanitize_markdown(md_text: str, header_yaml: str) -> str:
 
 def call_llm_for_data_reformat(doc_type: str, md_text: str) -> str:
     payload = {"doc_type": doc_type, "markdown": md_text}
-    resp = requests.post(DATA_REFORMAT_URL, json=payload, timeout=180)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("success"):
-        raise RuntimeError(data.get("error") or "reformat failed")
-    return data["data"]["result"]
+    monitor_log(
+        "api_call",
+        "data reformat start",
+        {"doc_type": doc_type, "url": DATA_REFORMAT_URL, "chars": len(md_text)},
+    )
+    try:
+        resp = requests.post(DATA_REFORMAT_URL, json=payload, timeout=180)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success"):
+            raise RuntimeError(data.get("error") or "reformat failed")
+        result = data["data"]["result"]
+        monitor_log(
+            "api_call",
+            "data reformat ok",
+            {"doc_type": doc_type, "status_code": resp.status_code},
+        )
+        return result
+    except Exception as e:
+        monitor_log(
+            "api_call",
+            "data reformat failed",
+            {"doc_type": doc_type, "url": DATA_REFORMAT_URL, "error": str(e)},
+        )
+        raise
 
-def build_draft_md(raw_text: str) -> str:
+def build_draft_md(raw_text: str, title: str) -> str:
     raw_text = raw_text.rstrip("\n")
 
     # ✅ 2번 핵심: draft도 build_initial_yaml 스키마 기반으로 헤더를 만든다
-    base_header_yaml = build_initial_yaml("diary")
+    base_header_yaml = build_initial_yaml("diary", title)
 
     # yaml 문자열 → dict 로드 → date/time 주입 → 다시 yaml로 dump
     header_obj = yaml.safe_load(base_header_yaml) or {}
@@ -507,10 +543,28 @@ def call_llm_for_reformat(md_text: str) -> str:
     (raw_text는 md_text에 포함되지 않도록 설계되어 있음)
     """
     payload = {"markdown": md_text}
-    resp = requests.post(LLM_FIX_URL, json=payload, timeout=180)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["result"]
+    monitor_log(
+        "api_call",
+        "diary reformat start",
+        {"url": LLM_FIX_URL, "chars": len(md_text)},
+    )
+    try:
+        resp = requests.post(LLM_FIX_URL, json=payload, timeout=180)
+        resp.raise_for_status()
+        data = resp.json()
+        monitor_log(
+            "api_call",
+            "diary reformat ok",
+            {"status_code": resp.status_code},
+        )
+        return data["result"]
+    except Exception as e:
+        monitor_log(
+            "api_call",
+            "diary reformat failed",
+            {"url": LLM_FIX_URL, "error": str(e)},
+        )
+        raise
 
     
   
@@ -521,6 +575,7 @@ def handle_new_file(file_path: Path) -> bool:
         return False
     doc_type = "diary"
     print(f"[INFO] Ne0w file detected: {file_path}")
+    monitor_log("file_list", "new diary file", {"path": str(file_path)})
 
     try:
         # 1) 원문 로드
@@ -529,8 +584,8 @@ def handle_new_file(file_path: Path) -> bool:
         header_yaml = build_initial_yaml(doc_type, title)
  
         # 2) LLM 정제 → sanitize (generic과 동일한 순서)
+        draft_md = build_draft_md(raw_text, title)
         try:
-            draft_md = build_draft_md(doc_type, title, raw_text)
             refined_md = call_llm_for_reformat(draft_md)
             refined_md = sanitize_markdown(refined_md, header_yaml)
             print("[INFO] Metadata refined by LLM")
@@ -538,6 +593,7 @@ def handle_new_file(file_path: Path) -> bool:
             # diary는 "output은 1개만" 정책 때문에 LLM 실패 시에도 draft를 최종으로 저장
             # (generic처럼 그냥 False로 끝내면 txt가 남고 다음 워치에서 재처리될 수 있음)
             print(f"[WARN] LLM 호출 실패(diary) → draft로 폴백: {e}")
+            refined_md = draft_md
 
         # 5) 최종 저장 직전에 raw_text를 시스템이 맨 아래에 붙임
         final_md = append_raw_text(refined_md, raw_text)
@@ -547,11 +603,13 @@ def handle_new_file(file_path: Path) -> bool:
         out_path = ensure_unique_path(DIARY_OUTPUT_DIR, out_name)
         out_path.write_text(final_md, encoding="utf-8")
         print(f"[INFO] Saved formatted diary: {out_path}")
+        monitor_log("file_write", "saved diary", {"path": str(out_path)})
 
         # 7) 원본 txt 이동
         processed_path = DIARY_PROCESSED_DIR / file_path.name
         shutil.move(str(file_path), str(processed_path))
         print(f"[INFO] Moved original to: {processed_path}")
+        monitor_log("file_write", "moved diary original", {"path": str(processed_path)})
 
         update_state_on_success(file_path.name)
         return True
@@ -559,6 +617,7 @@ def handle_new_file(file_path: Path) -> bool:
     except Exception as e:
         update_state_on_error(e)
         print(f"[ERROR] handle_new_file failed: {e}")
+        monitor_log("error", "handle_new_file failed", {"error": str(e)})
         return False
 
 
@@ -567,6 +626,7 @@ def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
         return False
     doc_type = cfg["doc_type"]
     print(f"[INFO] New file detected ({doc_type}): {file_path}")
+    monitor_log("file_list", "new generic file", {"doc_type": doc_type, "path": str(file_path)})
 
     raw_text = file_path.read_text(encoding="utf-8")
     title = file_path.stem.replace("-", " ").strip() or doc_type
@@ -578,25 +638,39 @@ def handle_new_generic_file(file_path: Path, cfg: dict) -> bool:
     except Exception as e:
         update_state_on_error(e)
         print(f"[ERROR] LLM 호출 실패 ({doc_type}): {e}")
+        monitor_log("error", "llm reformat failed", {"doc_type": doc_type, "error": str(e)})
         return False
 
     out_name = make_generic_output_filename(doc_type, title)
     out_path = cfg["output"] / out_name
     out_path.write_text(formatted_md, encoding="utf-8")
     print(f"[INFO] Saved formatted {doc_type}: {out_path}")
+    monitor_log("file_write", "saved formatted", {"doc_type": doc_type, "path": str(out_path)})
 
     processed_dir = cfg["input"] / "_processed"
     processed_dir.mkdir(parents=True, exist_ok=True)
     processed_path = processed_dir / file_path.name
     shutil.move(str(file_path), str(processed_path))
     print(f"[INFO] Moved original to: {processed_path}")
+    monitor_log("file_write", "moved original", {"doc_type": doc_type, "path": str(processed_path)})
 
     update_state_on_success(file_path.name)
     return True
 
 
 def scan_diary(processed_files: set[str]) -> set[str]:
-    for path in DIARY_INPUT_DIR.glob("*.txt"):
+    candidates = list(DIARY_INPUT_DIR.glob("*.txt"))
+    pending = [
+        p.name for p in candidates if IGNORE_PROCESSED or p.name not in processed_files
+    ]
+    if pending:
+        monitor_log(
+            "file_list",
+            "scan diary",
+            {"input_dir": str(DIARY_INPUT_DIR), "pending": len(pending)},
+        )
+
+    for path in candidates:
         filename = path.name
         if (not IGNORE_PROCESSED) and (filename in processed_files):
             continue
@@ -620,7 +694,18 @@ def scan_generic(processed_map: dict[str, set[str]]) -> dict[str, set[str]]:
         if not input_dir.exists():
             continue
 
-        for path in input_dir.glob("*.txt"):
+        candidates = list(input_dir.glob("*.txt"))
+        pending = [
+            p.name for p in candidates if IGNORE_PROCESSED or p.name not in processed
+        ]
+        if pending:
+            monitor_log(
+                "file_list",
+                "scan generic",
+                {"doc_type": cfg["doc_type"], "input_dir": str(input_dir), "pending": len(pending)},
+            )
+
+        for path in candidates:
             filename = path.name
             if (not IGNORE_PROCESSED) and (filename in processed):
                 continue
@@ -696,6 +781,7 @@ class ReuseTCPServer(socketserver.TCPServer):
 def start_health_server():
     with ReuseTCPServer(("", HEALTH_PORT), HealthHandler) as httpd:
         print(f"[INFO] data-format-bot health server started on port {HEALTH_PORT}")
+        monitor_log("server", "health server started", {"port": HEALTH_PORT})
         httpd.serve_forever()
 
 # -----------------------------
@@ -713,6 +799,11 @@ def main():
     STATE["running"] = True
 
     print("[INFO] data-format-bot started")
+    monitor_log(
+        "server",
+        "data-format-bot started",
+        {"scan_interval": SCAN_INTERVAL, "scan_roots": [str(r) for r in SCAN_ROOTS]},
+    )
     print(f"[INFO] DIARY_INPUT_DIR  = {DIARY_INPUT_DIR}")
     print(f"[INFO] DIARY_OUTPUT_DIR = {DIARY_OUTPUT_DIR}")
     for name, cfg in TYPE_CONFIGS.items():

@@ -37,8 +37,26 @@ const WORKS_ROOT = resolveDataPath("WORKS_ROOT", "works");
 const BIBLE_ROOT = resolveDataPath("BIBLE_ROOT", "bible");
 const DEFAULT_LIMIT_PER_TYPE = parseInt(process.env.LIMIT_PER_TYPE || "10", 10);
 const DEFAULT_PREVIEW_CHARS = parseInt(process.env.PREVIEW_CHARS || "1200", 10);
+const MONITOR_LOG_DIR = process.env.MONITOR_LOG_DIR || "/data/_logs";
+const MONITOR_LOG_FILE = path.join(MONITOR_LOG_DIR, "mcp-filesystem.jsonl");
 
 app.use(express.json());
+
+function monitorLog(category, message, payload = {}) {
+  const record = {
+    ts: new Date().toISOString(),
+    module: "mcp-filesystem",
+    category,
+    message,
+    payload,
+  };
+  try {
+    fs.mkdirSync(MONITOR_LOG_DIR, { recursive: true });
+    fs.appendFileSync(MONITOR_LOG_FILE, `${JSON.stringify(record)}\n`, "utf-8");
+  } catch (e) {
+    // best-effort logging only
+  }
+}
 
 function listFilesInRoot(root) {
   const results = [];
@@ -180,6 +198,7 @@ function buildPreview(body, previewChars) {
 
 app.get("/files", (req, res) => {
   const files = listFiles().map((p) => path.relative(DIARY_ROOT, p));
+  monitorLog("file_list", "files list", { count: files.length });
   res.json({ files });
 });
 
@@ -196,7 +215,12 @@ app.get("/file", (req, res) => {
 
 // 새: 카테고리별 파일 목록
 app.get("/files-all", (req, res) => {
-  res.json(listCategorized());
+  const data = listCategorized();
+  const counts = Object.fromEntries(
+    Object.entries(data).map(([key, list]) => [key, list.length])
+  );
+  monitorLog("file_list", "files-all list", { counts });
+  res.json(data);
 });
 
 // 새: 카테고리 지정 파일 읽기
@@ -303,6 +327,16 @@ app.post("/filter", (req, res) => {
       }
       data[t] = selected;
     }
+
+    const counts = Object.fromEntries(
+      Object.entries(data).map(([key, list]) => [key, list.length])
+    );
+    monitorLog("file_list", "filter list", {
+      types,
+      counts,
+      limit,
+      preview_chars: previewLen,
+    });
 
     return res.json({
       success: true,

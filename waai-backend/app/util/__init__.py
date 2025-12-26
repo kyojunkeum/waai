@@ -1,6 +1,7 @@
 """Shared utility functions for WAAI backend."""
 
 from .trace import ensure_trace_id, generate_trace_id, new_trace_id, log_event
+from .monitor_log import monitor_log
 from .fileio import (
     compute_sha256,
     parse_front_matter,
@@ -18,6 +19,7 @@ __all__ = [
     "generate_trace_id",
     "new_trace_id",
     "log_event",
+    "monitor_log",
     "compute_sha256",
     "sha256_file",
     "parse_front_matter",

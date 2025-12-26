@@ -1,7 +1,7 @@
 """Application package for WAAI backend.
 
 This module bootstraps the FastAPI instance from the top-level app.py while
-also exposing subpackages (rag, api, util).
+also exposing subpackages (api, util).
 """
 
 from __future__ import annotations

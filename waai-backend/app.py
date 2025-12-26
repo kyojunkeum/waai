@@ -6,15 +6,18 @@ import json
 import logging
 import os
 import re
+import sqlite3
+import time
+import uuid
 from urllib.parse import quote_plus
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Any, List
 from collections import deque
 from typing import Tuple, Optional, Callable
 import httpx
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,7 +29,8 @@ from mcp_client import (
     get_project_timeline,
     select_and_summarize,
 )
-from utils import ensure_dir, normalize_query, save_txt
+from utils import ensure_dir, normalize_query, save_txt, monitor_log
+from utils.brainstorm import build_idea_filename, char_limit_1000, slugify_ko
 
 # 데이터 경로를 환경변수 → /data → 로컬 repo/data → 홈 경로 순서로 해석
 def _resolve_data_path(env_var: str, default_subpath: str, require_writable: bool = False) -> Path:
@@ -85,17 +89,18 @@ logger = logging.getLogger("waai-backend")
 # 데이터 로드 안전장치
 MAX_FILES_PER_TYPE = int(os.environ.get("MAX_FILES_PER_TYPE", "10"))
 
-# 🔹 공통 LLM 설정
-LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama").lower()
-
-# Ollama용
+# 🔹 공통 LLM 설정 (Ollama direct)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-MODEL_NAME = os.environ.get("MODEL_NAME", "qwen2:7b")
 
-# OpenAI / 호환 서버용 (선택)
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} 환경변수가 필요합니다.")
+    return value
+
+OLLAMA_REFINE_MODEL = _require_env("OLLAMA_REFINE_MODEL")
+OLLAMA_CREATIVE_MODEL = _require_env("OLLAMA_CREATIVE_MODEL")
+OLLAMA_BRAINSTORM_MODEL = _require_env("OLLAMA_BRAINSTORM_MODEL")
 
 # docker-compose 기본 포트는 7003. 필요시 환경변수로 오버라이드.
 PLAYWRIGHT_MCP_URL = os.environ.get("PLAYWRIGHT_MCP_URL", "http://mcp-playwright:7003")
@@ -111,6 +116,10 @@ CRITIQUE_MIN_CHARS=600
 
 # stat 히스토리 경로
 STATS_HISTORY_PATH = Path(os.environ.get("STATS_HISTORY_PATH", "/data/_stats/stats_history.jsonl"))
+OPEN_WEBUI_DB_PATH = Path(os.environ.get("OPEN_WEBUI_DB_PATH", "/openwebui/data/webui.db"))
+
+_repo_root = Path(__file__).resolve().parent.parent
+BRAINSTORM_IDEAS_DIR = Path(os.environ.get("BRAINSTORM_IDEAS_DIR", "/home/witness/memory/ideas")).resolve()
 
 
 class DiaryFormatRequest(BaseModel):
@@ -246,6 +255,14 @@ class ReformatResult(BaseModel):
     body: str
     tags: list[str]
 
+
+class BrainstormFinalizeRequest(BaseModel):
+    session_id: str
+
+
+class BrainstormFinalizeResponse(BaseModel):
+    saved_files: list[str]
+
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
@@ -265,6 +282,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def monitor_api_requests(request: Request, call_next):
+    start = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        monitor_log(
+            "api_request",
+            "request failed",
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": 500,
+                "elapsed_ms": elapsed_ms,
+                "error": str(exc),
+            },
+        )
+        raise
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    monitor_log(
+        "api_request",
+        "request handled",
+        {
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "elapsed_ms": elapsed_ms,
+        },
+    )
+    return response
 
 def load_stats_history(limit: int = 200):
     if not STATS_HISTORY_PATH.exists():
@@ -443,23 +494,20 @@ def validate_diary_front_matter(meta: dict) -> None:
     if str(meta["type"]).strip().lower() != "diary":
         raise ValueError("type must be 'diary'")
 
-    # mood_score range + 1 decimal
+    # mood_score range (invalid -> 0.0 fallback, keep other fields)
     try:
-        ms = float(meta["mood_score"])
+        ms = float(meta.get("mood_score"))
+        if ms < -1.0 or ms > 1.0:
+            raise ValueError("out of range")
+        meta["mood_score"] = ms
     except Exception:
-        raise ValueError("mood_score must be a float")
-    if ms < -1.0 or ms > 1.0:
-        raise ValueError("mood_score must be between -1.0 and 1.0")
-    if round(ms, 1) != ms:
-        raise ValueError("mood_score must have at most 1 decimal place")
+        meta["mood_score"] = 0.0
 
     # tags 3~7
     if not _is_list_of_str(meta.get("tags"), min_len=3, max_len=7):
         raise ValueError("tags must be list with 3~7 items")
 
-    # summary length (너무 짧으면 품질상 실패로 간주)
-    if len(str(meta.get("summary") or "").strip()) < 10:
-        raise ValueError("summary too short")
+    # summary length는 검증 실패 사유로 삼지 않음 (짧아도 허용)
 
 
 def validate_data_front_matter(meta: dict, doc_type: str) -> None:
@@ -537,6 +585,7 @@ async def call_llm_with_front_matter_retry(
     validate_meta_fn: Callable[[dict], None],
     retries: int = 2,
     must_have_front_matter: bool = True,
+    model: str | None = None,
 ) -> str:
     """
     LLM이 Markdown을 반환한다고 가정.
@@ -547,7 +596,7 @@ async def call_llm_with_front_matter_retry(
     last_err = ""
 
     for attempt in range(retries + 1):
-        md = await call_llm(prompt)
+        md = await call_llm(prompt, model=model)
         md, meta, body, has_fm = normalize_front_matter_output(md)
         last_md = md
 
@@ -557,15 +606,19 @@ async def call_llm_with_front_matter_retry(
 
             validate_meta_fn(meta)
             logger.info("[llm_retry] attempt=%s has_front_matter=%s", attempt, has_fm)
-            # 통과하면 그대로 반환
-            return md
+            # 통과하면 YAML을 정규화해서 반환 (검증 단계에서 수정된 값 반영)
+            new_fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).rstrip()
+            body_text = (body or "").lstrip("\n")
+            if body_text:
+                return f"---\n{new_fm}\n---\n\n{body_text}"
+            return f"---\n{new_fm}\n---\n"
 
         except Exception as exc:
             last_err = str(exc)
             if attempt >= retries:
-                # 마지막 실패는 원문 그대로 반환하지 말고, 호출자 쪽에서 에러 처리할지 선택 가능
-                logger.info("[llm_retry] validation_failed=%s", last_err)
-                raise ValueError(f"LLM output validation failed after retries: {last_err}")
+                # 재시도 후에도 실패하면 마지막 결과를 그대로 통과시킨다.
+                logger.info("[llm_retry] validation_failed_passthrough=%s", last_err)
+                return last_md
 
 
             # 다음 시도용 프롬프트 강화
@@ -595,64 +648,53 @@ class DiarySchema(BaseModel):
         datetime.strptime(v, "%Y-%m-%d")
         return v
 
-    @field_validator("mood_score")
-    @classmethod
-    def validate_mood_score_precision(cls, v):
-        if round(v, 1) != v:
-            raise ValueError("mood_score must have at most 1 decimal place")
-        return v
 
-
-async def call_llm(prompt: str) -> str:
+async def call_llm(prompt: str, *, model: str | None = None) -> str:
     """
     WAAI 백엔드용 공통 LLM 호출 함수
-    - LLM_BACKEND=ollama  : Ollama /api/generate
-    - LLM_BACKEND=openai  : OpenAI 또는 호환 서버 /v1/chat/completions
+    - Ollama /api/generate (direct)
     """
-    backend = LLM_BACKEND
-
-    # 1) Ollama
-    if backend == "ollama":
+    use_model = model or OLLAMA_REFINE_MODEL
+    start = time.monotonic()
+    monitor_log(
+        "llm_call",
+        "ollama generate start",
+        {"model": use_model, "prompt_chars": len(prompt)},
+    )
+    try:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
-                    "model": MODEL_NAME,
+                    "model": use_model,
                     "prompt": prompt,
                     "stream": False,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("response", "")
-
-    # 2) OpenAI / 호환 서버
-    elif backend == "openai":
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY 가 설정되어 있지 않습니다.")
-
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": OPENAI_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
-        }
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
-
-    else:
-        raise RuntimeError(f"지원하지 않는 LLM_BACKEND: {backend}")
+            response_text = data.get("response", "")
+        monitor_log(
+            "llm_call",
+            "ollama generate ok",
+            {
+                "model": use_model,
+                "elapsed_ms": int((time.monotonic() - start) * 1000),
+                "response_chars": len(response_text),
+            },
+        )
+        return response_text
+    except Exception as exc:
+        monitor_log(
+            "llm_call",
+            "ollama generate failed",
+            {
+                "model": use_model,
+                "elapsed_ms": int((time.monotonic() - start) * 1000),
+                "error": str(exc),
+            },
+        )
+        raise
 
 
 def standard_response(success: bool = True, message: str = "ok", data: Any = None, error: Any = None):
@@ -708,6 +750,205 @@ def _extract_keyword_from_prompt(user_prompt: str) -> str | None:
         if keyword:
             return keyword
     return None
+
+
+def _parse_openwebui_chat_entries(chat_json: str | None) -> list[dict[str, Any]] | None:
+    if not chat_json:
+        return None
+    try:
+        payload = json.loads(chat_json)
+    except Exception:
+        logger.exception("openwebui chat json parse failed")
+        return None
+
+    messages = payload.get("messages") or []
+    entries: list[dict[str, Any]] = []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if text:
+                        parts.append(str(text))
+            content = "\n".join(parts)
+        if content is None:
+            continue
+        text = str(content).strip()
+        if not text:
+            continue
+        entries.append(
+            {
+                "role": msg.get("role") or "user",
+                "content": text,
+                "meta": {
+                    "source": "openwebui",
+                    "message_id": msg.get("id"),
+                    "timestamp": msg.get("timestamp"),
+                    "index": idx,
+                },
+            }
+        )
+
+    if not entries:
+        return None
+
+    entries.sort(
+        key=lambda item: (
+            item.get("meta", {}).get("timestamp") is None,
+            item.get("meta", {}).get("timestamp") or 0,
+            item.get("meta", {}).get("index") or 0,
+        )
+    )
+    return entries
+
+
+def _load_openwebui_chat_entries(session_id: str) -> list[dict[str, Any]] | None:
+    db_path = OPEN_WEBUI_DB_PATH
+    if not db_path.exists():
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except Exception:
+        logger.exception("openwebui db open failed: %s", db_path)
+        return None
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "select chat from chat where id = ? or share_id = ? or title = ? order by updated_at desc limit 1",
+            (session_id, session_id, session_id),
+        )
+        row = cur.fetchone()
+    except Exception:
+        logger.exception("openwebui chat query failed")
+        return None
+    finally:
+        conn.close()
+
+    return _parse_openwebui_chat_entries(row[0] if row else None)
+
+
+def _load_latest_openwebui_chat_entries() -> list[dict[str, Any]] | None:
+    db_path = OPEN_WEBUI_DB_PATH
+    if not db_path.exists():
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except Exception:
+        logger.exception("openwebui db open failed: %s", db_path)
+        return None
+
+    try:
+        cur = conn.cursor()
+        cur.execute("select id, chat from chat order by created_at desc limit 1")
+        row = cur.fetchone()
+    except Exception:
+        logger.exception("openwebui latest chat query failed")
+        return None
+    finally:
+        conn.close()
+
+    return _parse_openwebui_chat_entries(row[1] if row else None)
+
+
+def _extract_json_array_block(text: str) -> str:
+    match = re.search(r"\[.*\]", text, re.S)
+    return match.group(0) if match else "[]"
+
+
+def _extract_brainstorm_ideas(raw: str) -> list[str]:
+    ideas: list[str] = []
+    if not raw:
+        return ideas
+
+    try:
+        json_block = _extract_json_array_block(raw)
+        data = json.loads(json_block)
+        if isinstance(data, list):
+            ideas = [str(x).strip() for x in data if str(x).strip()]
+    except Exception:
+        ideas = []
+
+    if len(ideas) >= 3:
+        return ideas
+
+    cleaned = re.sub(r"```(?:json)?", "", raw, flags=re.I).strip()
+    bullet_re = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+    lines = cleaned.splitlines()
+    current: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        if bullet_re.match(line):
+            if current:
+                ideas.append(" ".join(current).strip())
+                current = []
+            current.append(bullet_re.sub("", line).strip())
+        else:
+            if current:
+                current.append(line.strip())
+    if current:
+        ideas.append(" ".join(current).strip())
+
+    if len(ideas) < 3:
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", cleaned) if b.strip()]
+        ideas.extend(blocks)
+
+    if len(ideas) < 3:
+        ideas.extend([line.strip() for line in lines if line.strip()])
+
+    deduped: list[str] = []
+    for idea in ideas:
+        if idea and idea not in deduped:
+            deduped.append(idea)
+        if len(deduped) >= 3:
+            break
+    return deduped
+
+
+def _extract_first_sentence(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned:
+        return ""
+    parts = re.split(r"[.!?。！？]\s*", cleaned, maxsplit=1)
+    return parts[0].strip() if parts else cleaned
+
+
+def _build_brainstorm_ideas_prompt(entries: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for item in entries:
+        role = item.get("role") or "user"
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        meta = item.get("meta")
+        meta_block = ""
+        if isinstance(meta, dict) and meta:
+            meta_block = f" (meta: {json.dumps(meta, ensure_ascii=False)})"
+        lines.append(f"[{role}] {content}{meta_block}")
+
+    convo = "\n".join(lines[-200:])
+    return f"""
+너는 브레인스토밍 로그를 바탕으로 새로운 아이디어를 제안하는 작가 보조 AI다.
+아래 로그를 참고해 서로 다른 아이디어 3개를 생성하라.
+
+규칙:
+- 각 아이디어는 1000자 내외 한국어 문단 1개
+- "상세 아이디어 포함": 배경/핵심 갈등/전개 방향이 드러나야 한다
+- 서로 다른 방향의 아이디어로 작성
+- 출력은 JSON 배열 형태만 허용. 예: ["아이디어1", "아이디어2", "아이디어3"]
+
+[브레인스토밍 로그]
+{convo}
+""".strip()
 
 
 def _extract_keywords_from_prompt(prompt: str, limit: int = 5) -> list[str]:
@@ -900,7 +1141,7 @@ topic, keyword, start_date, end_date, mode, output_format, extra_instruction
 \"\"\"{user_prompt}\"\"\"
 """.strip()
 
-    raw = await call_llm(parser_prompt)
+    raw = await call_llm(parser_prompt, model=OLLAMA_REFINE_MODEL)
     js = extract_json_block(raw)
 
     try:
@@ -1488,7 +1729,7 @@ async def api_diary_preview(body: DiaryFormatRequest):
     - Open WebUI / 별도 Web UI 에서 바로 호출해서 화면에 보여주기 용도
     """
     prompt = build_diary_format_prompt(body)
-    md_text = await call_llm(prompt)
+    md_text = await call_llm(prompt, model=OLLAMA_REFINE_MODEL)
     return DiaryFormatResponse(result=md_text)
 
 
@@ -1597,6 +1838,7 @@ async def api_diary_reformat_md(body: DiaryReformatRequest):
         validate_meta_fn=validate_diary_front_matter,
         retries=int(os.environ.get("LLM_VALIDATE_RETRIES", "2")),
         must_have_front_matter=True,
+        model=OLLAMA_REFINE_MODEL,
     )
     return DiaryReformatResponse(result=new_md)
 
@@ -1625,6 +1867,7 @@ async def api_data_reformat_md(body: DataReformatRequest):
             validate_meta_fn=lambda meta: validate_data_front_matter(meta, doc_type),
             retries=int(os.environ.get("LLM_VALIDATE_RETRIES", "2")),
             must_have_front_matter=True,
+            model=OLLAMA_REFINE_MODEL,
         )
         return standard_response(success=True, message="ok", data={"result": new_md}, error=None)
     except Exception as exc:
@@ -1682,10 +1925,10 @@ async def dashboard(
 @app.get("/llm-info")
 async def llm_info():
     return {
-        "backend": LLM_BACKEND,
-        "model": MODEL_NAME,
-        "ollama_url": OLLAMA_URL if LLM_BACKEND == "ollama" else None,
-        "openai_model": OPENAI_MODEL if LLM_BACKEND == "openai" else None,
+        "backend": "ollama",
+        "model": OLLAMA_REFINE_MODEL,
+        "ollama_url": OLLAMA_URL,
+        "creative_model": OLLAMA_CREATIVE_MODEL,
     }
 
 
@@ -1990,12 +2233,15 @@ async def generate_plan_from_data_internal(req: PlanFromDataRequest) -> PlanGene
         extra_instruction=req.extra_instruction,
     )
 
-    plan_text = await call_llm(prompt)
+    plan_text = await call_llm(prompt, model=OLLAMA_CREATIVE_MODEL)
 
     # (선택) 본문 품질 규칙: 너무 짧으면 재시도 같은 간단 규칙
     if len(plan_text.strip()) < 500:
         # 재시도: (프롬프트 강화)
-        plan_text = await call_llm(prompt + "\n\n[품질 기준] 최소 500자 이상, 섹션 구조를 반드시 채워라.")
+        plan_text = await call_llm(
+            prompt + "\n\n[품질 기준] 최소 500자 이상, 섹션 구조를 반드시 채워라.",
+            model=OLLAMA_CREATIVE_MODEL,
+        )
 
     sources_section = _render_sources_list(sources_dict)
     plan_text_with_sources = f"{plan_text}\n\n---\n{sources_section}"
@@ -2274,6 +2520,56 @@ async def web_search_fetch(req: WebSearchFetchRequest):
 
 
 # =========================
+# 💡 Brainstorm 로그/아이디어 API
+# =========================
+
+
+@app.post(
+    "/api/brainstorm/finalize",
+    response_model=BrainstormFinalizeResponse,
+    operation_id="brainstorm_finalize",
+)
+async def brainstorm_finalize(req: BrainstormFinalizeRequest):
+    session_id = req.session_id.strip()
+    if "/" in session_id or "\\" in session_id or ".." in session_id:
+        raise HTTPException(status_code=400, detail="invalid session_id")
+    entries = _load_openwebui_chat_entries(session_id)
+    if not entries:
+        entries = _load_latest_openwebui_chat_entries()
+        if entries:
+            logger.info("brainstorm_finalize fallback to latest openwebui chat")
+    if not entries:
+        raise HTTPException(status_code=404, detail="openwebui chat not found")
+
+    prompt = _build_brainstorm_ideas_prompt(entries)
+    raw = await call_llm(prompt, model=OLLAMA_BRAINSTORM_MODEL)
+    ideas = _extract_brainstorm_ideas(raw)
+
+    if len(ideas) < 3:
+        raise HTTPException(status_code=500, detail="failed to generate 3 ideas")
+
+    ensure_dir(BRAINSTORM_IDEAS_DIR)
+    saved_files: list[str] = []
+    date_part = datetime.now().strftime("%Y%m%d")
+
+    for idea in ideas[:3]:
+        trimmed = char_limit_1000(idea)
+        slug_source = _extract_first_sentence(trimmed) or "idea"
+        slug = slugify_ko(slug_source)
+        filename = build_idea_filename(date_part, str(uuid.uuid4()), slug)
+        path = BRAINSTORM_IDEAS_DIR / filename
+        path.write_text(trimmed, encoding="utf-8")
+        saved_files.append(str(path))
+
+    monitor_log(
+        "brainstorm_finalize",
+        "ideas saved",
+        {"session_id": session_id, "count": len(saved_files), "files": saved_files},
+    )
+    return BrainstormFinalizeResponse(saved_files=saved_files)
+
+
+# =========================
 # 📑 단편소설 합평 API (NEW)
 # =========================
 
@@ -2515,7 +2811,7 @@ async def api_critique(req: CritiqueRequest):
                 total_parts=total_parts,
                 extra_instruction=req.extra_instruction,
             )
-            chunk_text = await call_llm(chunk_prompt)
+            chunk_text = await call_llm(chunk_prompt, model=OLLAMA_REFINE_MODEL)
             chunk_outputs.append(chunk_text)
             summary = _extract_chunk_summary(chunk_text) or _fallback_chunk_summary(chunk)
             part_summaries.append(summary)
@@ -2526,11 +2822,11 @@ async def api_critique(req: CritiqueRequest):
             criteria,
             extra_instruction=req.extra_instruction,
         )
-        overall_text = await call_llm(overall_prompt)
+        overall_text = await call_llm(overall_prompt, model=OLLAMA_REFINE_MODEL)
         critique_text = _assemble_chunked_critique(chunk_outputs, overall_text)
     else:
         prompt = _build_critique_prompt(req.title, req.content, criteria, extra_instruction=req.extra_instruction)
-        critique_text = await call_llm(prompt)
+        critique_text = await call_llm(prompt, model=OLLAMA_REFINE_MODEL)
 
     critique_path: str | None = None
 

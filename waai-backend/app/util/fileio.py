@@ -7,6 +7,8 @@ from typing import Any, Tuple
 
 import yaml
 
+from .monitor_log import monitor_log
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,7 +97,9 @@ def safe_glob_md(root: str | Path = "/waai/data") -> list[Path]:
             logger.error("failed to inspect path=%s err=%s", path, exc)
             continue
 
-    return sorted(results)
+    results = sorted(results)
+    monitor_log("file_list", "safe_glob_md", {"root": str(base), "count": len(results)})
+    return results
 
 
 def safe_glob(root: str | Path, pattern: str = "*") -> list[Path]:
@@ -120,4 +124,10 @@ def safe_glob(root: str | Path, pattern: str = "*") -> list[Path]:
         logger.error("failed to glob root=%s pattern=%s err=%s", base, pattern, exc)
         return []
 
-    return sorted(results)
+    results = sorted(results)
+    monitor_log(
+        "file_list",
+        "safe_glob",
+        {"root": str(base), "pattern": pattern, "count": len(results)},
+    )
+    return results

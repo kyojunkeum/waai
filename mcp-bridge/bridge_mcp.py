@@ -40,17 +40,16 @@ TYPE_LIMIT_OVERRIDES = {
     "bible": int(os.environ.get("LIMIT_BIBLE", str(DEFAULT_LIMIT_PER_TYPE))),
 }
 
-# Ollama용
+# Ollama용 (direct)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-MODEL_NAME = os.environ.get("MODEL_NAME", "qwen2:7b")
-# LLM 백엔드 선택
-LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama").lower()
-# MODEL_NAME = os.environ.get("MODEL_NAME", "llama3.1")
 
-# OpenAI / 호환 서버용 (선택)
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} 환경변수가 필요합니다.")
+    return value
+
+OLLAMA_REFINE_MODEL = _require_env("OLLAMA_REFINE_MODEL")
 
 
 app = FastAPI()
@@ -480,54 +479,21 @@ async def load_entries_by_type(file_type: str, limit: Optional[int] = None,
 async def call_llm(prompt: str) -> str:
     """
     공통 LLM 호출 함수
-    - LLM_BACKEND=ollama  : Ollama /api/generate
-    - LLM_BACKEND=openai  : OpenAI 또는 호환 서버 /v1/chat/completions
+    - Ollama /api/generate (direct)
     """
-    backend = LLM_BACKEND
-
-    # 1) Ollama
-    if backend == "ollama":
-        payload = {
-            "model": MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-        }
-        try:
-            async with httpx.AsyncClient(timeout=600.0) as client:
-                r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
-                r.raise_for_status()
-                data = r.json()
-                return data.get("response", "")
-        except httpx.ReadTimeout:
-            return "LLM 호출이 시간 초과되었습니다. 다시 시도해 주세요."
-
-    # 2) OpenAI / 호환 서버 (예: vLLM, LM Studio)
-    elif backend == "openai":
-        if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY 가 설정되어 있지 않습니다.")
-
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": OPENAI_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
-        }
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            r = await client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
+    payload = {
+        "model": OLLAMA_REFINE_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
             r.raise_for_status()
             data = r.json()
-            return data["choices"][0]["message"]["content"]
-
-    else:
-        raise RuntimeError(f"지원하지 않는 LLM_BACKEND: {backend}")
+            return data.get("response", "")
+    except httpx.ReadTimeout:
+        return "LLM 호출이 시간 초과되었습니다. 다시 시도해 주세요."
 
 # ---------- Summarize(기존) ----------
 

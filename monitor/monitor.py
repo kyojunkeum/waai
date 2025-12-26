@@ -27,10 +27,16 @@ HEALTH_TARGETS = [
 # -----------------------
 # 환경변수 & 기본 설정
 # -----------------------
-INTERVAL = int(os.getenv("INTERVAL", "60"))  # 초
+TICK_INTERVAL = float(os.getenv("TICK_INTERVAL", os.getenv("INTERVAL", "5")))  # 초
 
 STATS_URL = "http://data-format-bot:8001/stats"
 STATS_INTERVAL = 300  # 5분
+
+# 각 체크 주기 (초) - 빠르게 돌리되 부하 큰 작업은 완만하게 분산
+HEALTH_INTERVAL = float(os.getenv("HEALTH_INTERVAL", "30"))
+RESOURCE_INTERVAL = float(os.getenv("RESOURCE_INTERVAL", "30"))
+FILE_INTERVAL = float(os.getenv("FILE_INTERVAL", "10"))
+MODULE_LOG_INTERVAL = float(os.getenv("MODULE_LOG_INTERVAL", "5"))
 
 
 # CPU / GPU 임계치 (%)
@@ -43,12 +49,18 @@ DIARY_DIR = Path(os.getenv("DIARY_DIR", "/waai/data/diary"))
 # 합평 원고 인입 디렉터리 (새 파일 생성 시 /api/critique 호출)
 CRITIQUE_INBOX_DIR = Path(os.getenv("CRITIQUE_INBOX_DIR", "/home/witness/waai/data/objects"))
 CRITIQUE_PROCESSED_DIR = Path(os.getenv("CRITIQUE_PROCESSED_DIR", "/waai/data/critique/processed"))
+CRITIQUE_OBJECTS_ROOT = Path(os.getenv("CRITIQUE_OBJECTS_ROOT", "/home/witness/waai/data/critique/objects"))
+CRITIQUE_OBJECTS_ROOT_ALT = Path(os.getenv("CRITIQUE_OBJECTS_ROOT_ALT", "/waai/data/critique/objects"))
+CRITIQUE_INBOX_ROOT = Path(os.getenv("CRITIQUE_INBOX_ROOT", "/home/witness/waai/data/objects"))
+CRITIQUE_INBOX_ROOT_ALT = Path(os.getenv("CRITIQUE_INBOX_ROOT_ALT", "/waai/data/objects"))
 CRITIQUE_API_URL = os.getenv("CRITIQUE_API_URL", "http://waai-backend:8000/api/critique")
 CRITIQUE_EXTENSIONS = {".txt", ".md"}
-CRITIQUE_CHUNK_AUTO_CHARS = int(os.getenv("CRITIQUE_CHUNK_AUTO_CHARS", "12000"))
+CRITIQUE_CHUNK_AUTO_CHARS = int(os.getenv("CRITIQUE_CHUNK_AUTO_CHARS", "6000"))
 
 # 로그 파일로도 남기고 싶으면 경로 설정 (없으면 콘솔만)
 LOG_FILE = os.getenv("MONITOR_LOG_FILE", "")
+MODULE_LOG_DIR = Path(os.getenv("MONITOR_LOG_DIR", "/data/_logs"))
+module_log_offsets: dict[str, int] = {}
 
 # 이미 감지한 md 파일 목록 (신규 생성 감지용)
 known_md_files: set[str] = set()
@@ -71,6 +83,51 @@ def log(msg: str, level: str = "INFO"):
         except Exception:
             # 로그 파일 에러는 모니터가 죽지 않도록 무시
             pass
+
+
+def _read_module_log_file(path: Path) -> None:
+    key = str(path)
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        module_log_offsets.pop(key, None)
+        return
+
+    offset = module_log_offsets.get(key, 0)
+    if size < offset:
+        offset = 0
+
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            f.seek(offset)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    log(f"[MODULE] {path.name} {line}", level="INFO")
+                    continue
+
+                module = record.get("module", path.stem)
+                category = record.get("category", "event")
+                message = record.get("message", "")
+                payload = record.get("payload", {})
+                log(
+                    f"[MODULE] {module} [{category}] {message} payload={payload}",
+                    level="INFO",
+                )
+            module_log_offsets[key] = f.tell()
+    except Exception as e:
+        log(f"[MODULE] 로그 읽기 실패: {path} err={e}", level="WARN")
+
+
+def read_module_logs() -> None:
+    if not MODULE_LOG_DIR.exists():
+        return
+    for path in sorted(MODULE_LOG_DIR.glob("*.jsonl")):
+        _read_module_log_file(path)
 
 # -----------------------
 # 0. Stats
@@ -308,7 +365,7 @@ def _build_critique_payload(path: Path, raw_text: str) -> dict[str, object] | No
 
 def _post_critique_request(payload: dict[str, str], source_name: str) -> bool:
     try:
-        r = httpx.post(CRITIQUE_API_URL, json=payload, timeout=120.0)
+        r = httpx.post(CRITIQUE_API_URL, json=payload, timeout=300.0)
     except Exception as e:
         log(f"[CRITIQUE] API 호출 실패 ({source_name}): {e}", level="ERROR")
         return False
@@ -331,13 +388,37 @@ def _post_critique_request(payload: dict[str, str], source_name: str) -> bool:
     return True
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _pick_processed_dir(path: Path) -> Path:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+
+    for root in (CRITIQUE_OBJECTS_ROOT, CRITIQUE_OBJECTS_ROOT_ALT):
+        if _is_within(resolved, root):
+            return root / "_processed"
+    for root in (CRITIQUE_INBOX_ROOT, CRITIQUE_INBOX_ROOT_ALT):
+        if _is_within(resolved, root):
+            return root / "_processed"
+    return CRITIQUE_PROCESSED_DIR
+
+
 def _move_to_processed(path: Path) -> None:
     try:
-        CRITIQUE_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        dest = CRITIQUE_PROCESSED_DIR / path.name
+        processed_dir = _pick_processed_dir(path)
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        dest = processed_dir / path.name
         if dest.exists():
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dest = CRITIQUE_PROCESSED_DIR / f"{path.stem}_{stamp}{path.suffix}"
+            dest = processed_dir / f"{path.stem}_{stamp}{path.suffix}"
         path.replace(dest)
         log(f"[CRITIQUE] 원고 이동 완료 -> {dest}", level="INFO")
     except Exception as e:
@@ -385,7 +466,7 @@ def check_new_critique_files():
 # -----------------------
 def main():
     log(
-        f"모니터 시작: INTERVAL={INTERVAL}s, DIARY_DIR={DIARY_DIR}",
+        f"모니터 시작: TICK_INTERVAL={TICK_INTERVAL}s, DIARY_DIR={DIARY_DIR}",
         level="INFO",
     )
     log(
@@ -396,6 +477,12 @@ def main():
         f"HEALTH_TARGETS={HEALTH_TARGETS}",
         level="INFO",
     )
+    log(
+        "주기 설정: "
+        f"HEALTH={HEALTH_INTERVAL}s, RESOURCE={RESOURCE_INTERVAL}s, "
+        f"FILE={FILE_INTERVAL}s, MODULE_LOG={MODULE_LOG_INTERVAL}s",
+        level="INFO",
+    )
 
     init_known_md_files()
     init_known_critique_files()
@@ -403,23 +490,39 @@ def main():
     # 5) 데이터 저장
     threading.Thread(target=stats_collector_loop, daemon=True).start()
 
+    last_health = 0.0
+    last_resource = 0.0
+    last_file = 0.0
+    last_module_log = 0.0
+
     while True:
         try:
             log("=" * 30 + " 주기 모니터링 시작 " + "=" * 30, level="INFO")
 
+            now = time.monotonic()
+
             # 1) 헬스체크 (backend / mcp-bridge / data-format-bot 각각)
-            check_all_health()
+            if now - last_health >= HEALTH_INTERVAL:
+                check_all_health()
+                last_health = now
 
             # 2) CPU / GPU 사용률 체크
-            check_cpu_usage()
-            check_gpu_usage()
+            if now - last_resource >= RESOURCE_INTERVAL:
+                check_cpu_usage()
+                check_gpu_usage()
+                last_resource = now
 
             # 3) 신규 md 파일 생성 감지 (txt→md 포맷팅 완료 알림)
-            check_new_md_files()
-
             # 4) 신규 합평 원고 파일 감지 -> /api/critique 호출
-            check_new_critique_files()
+            if now - last_file >= FILE_INTERVAL:
+                check_new_md_files()
+                check_new_critique_files()
+                last_file = now
 
+            # 5) 모듈별 로그 집계
+            if now - last_module_log >= MODULE_LOG_INTERVAL:
+                read_module_logs()
+                last_module_log = now
 
 
 
@@ -427,7 +530,7 @@ def main():
             # 모니터 자체에서 잡히지 않은 예외가 터지면 여기서 최종 알림
             log(f"[MONITOR ERROR] 예기치 못한 에러 발생: {e}", level="ERROR")
 
-        time.sleep(INTERVAL)
+        time.sleep(TICK_INTERVAL)
 
 
 if __name__ == "__main__":
