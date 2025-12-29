@@ -3,14 +3,15 @@
 ## 1. 프로젝트 개요 (Overview)
 
 이 프로젝트는 작가들에게 자신만의 보조 작가를 채용하는 것 대신 AI 를 활용하여 시간이 지날수록 자신에게 최적화된 보조 작가를 활용할 수 있도록 고안된 프로젝트입니다. 
-Writer Assistant AI. WAAI 가 당신만의 기호를 충족하는 보조 작가가 되어 기획, 웹검색 기반 자료조사, 당신의 인생그래프, 원고 합평까지 수행해 줍니다.
+Writer Assistant AI. WAAI 가 당신만의 기호를 충족하는 보조 작가가 되어 기획, 웹검색 기반 자료조사, 당신의 인생그래프, 원고 합평, 브레인스토밍 까지 수행해 줍니다.
+특히, WAAI는 데이터 정제, 합평과 같은 규격화된 일은 refine 모델 / 기획서 생성과 같이 창의성과 구조화가 필요한 일은 creative 모델 / 브레인스토밍과 같이 극대화된 창의성이 필요한 일은 brainstorm 모델이 수행합니다. 
+목적별로 모델 파라미터를 최적화 설계/구현된 LLM 모델이 당신과 아이디어를 나누고, 자료를 정리해주며, 기획서를 만들어줍니다. 그리고 확실한 평가 기준을 통해 원고를 합평해줍니다.
 
 ## 2. 왜 이 프로젝트가 필요한가? (Problem)
 
 하나. 작가지망생이 가장 어렵고 감잡기가 힘든 부분이 바로 자료를 검색하고 정리하고 그것을 기반으로 글을 기획하는 일입니다. 
 하나하나 검색해야 하고, 일기들을 하나하나 읽어봐야 하고, 여러 자료들을 끊임없이 들여다보며 하나의 완성된 뼈대, 기획을 하는 것이 가장 지난하고 중요합니다. 
-WAAI 는 데이터를 검색하고, 저장하고, 그것들을 토대로 한 편의 글 또는 작품을 기획해줍니다. 어느 근거로부터 왔는지까지 정리해줍니다. 
-즉, 근거 데이터 기반으로, 일기가 많다면, 나의 삶을 기반으로 글을 기획해주는 것입니다. 
+WAAI 는 데이터를 검색하고, 저장하고, 그것들을 토대로 한 편의 글 또는 작품을 기획해줍니다. 심지어 WAAI와 함께 대화하며 최적화된 창의 모델과 아이디어의 브레인스토밍을 할 수 있고, 그 결과까지 정리하여 저장해줍니다.
 
 둘. 작가지망생이 가장 필요로 하는 것은 작품을 쓰는 게 아닙니다. 작품을 쓰고 싶기 때문에 글을 쓰는 것이기에, 그보다는 내가 쓴 글을 평가받는 것이 가장 힘들고 곤란합니다. 
 왜? 내 글의 평가를 맡길 만한 사람이 주변에 없습니다. 그러기 위해서는 기성 작가의 문하생으로 들어가거나, 민간 글쓰기 모임에 합류하여 합평을 해야 합니다. 
@@ -28,6 +29,8 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 둘. 기획서 생성 : 여러 데이터들을 기반으로 사용자가 OpenWebUI 프롬프트에 친 "키워드1", "키워드2"를 기반으로 파일 목록을 수집하고, 종합 요약한 뒤, 최종적으로 기획서를 작성합니다. 
 셋. 웹 검색 자료 저장 : 사용자가 "키워드1", "키워드2" 등을 입력하고 자료조사를 요청하면 조사한 기사의 텍스트를 추출하여 자동으로 저장합니다. 
 넷. 원고 합평 : 사용자가 프롬프트에 원고를 입력하면 그것을 기반으로 보유한 합평기준규칙에 따라 평가하고, 항목당 점수를 책정하여 원고와 결과를 저장합니다. 
+다섯. 브레인 스토밍 : 사용자가 AI와 프롬프트를 통해 다양한 아이디어를 나눕니다. 이때 브레인스토밍에 최적화된 모델과 대화를 하게 되며, 아이디어를 정제하여 저장하고 싶다면 /api/brainstorm/finalize 도구를 선택한 뒤 프롬프트를 보내면 
+대화를 기반으로 3가지의 아이디어를 도출하여 정리한 뒤 정제하여 /waai/data/ideas 에 저장합니다.
 
 ## 4. 시스템 구조 / 흐름 (Architecture) 
 
@@ -47,13 +50,22 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ Ollama : ollama 컨테이너가 데이터 정제 후 응답 ]
+[ Ollama : qweb2.5-refine-ko 모델이 데이터 정제 후 응답 ]
+
+↓
+
+[ Waai-backend : validate_date_front_matter 함수에서 메타 데이터 유효성 검증 후 누락 발견 시 llm 재호출 ] 
+
+↓
+
+[ Ollama : qweb2.5-refine-ko 모델이 데이터 재정제 후 응답 ]
 
 ↓
 
 [ Waai-backend : 정제된 data 를 /home/username/waai/data/ 에 저장 ]
 
-<img width="420" height="765" alt="image" src="https://github.com/user-attachments/assets/8740f6da-6df5-4dc6-bd53-74e5e3c77376" />
+<img width="631" height="890" alt="image" src="https://github.com/user-attachments/assets/d023394a-98f1-47c9-bcce-7f694fd5a954" />
+
 
 ---------------------------------------------------
 
@@ -65,7 +77,11 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ OpenWebUI : waai-backend 의  /api/plan/from-prompt API 호출 ]
+[ OpenWebUI : LLM 에게 사용자 프롬프트와 waai-backend 의  /api/plan/from-prompt API 호출 요청 ]
+
+↓
+
+[ Ollama : qwen2.5-refine-ko 모델이 사용자 프롬프트와 도구 호출 여부를 검토하여 도구 호출 ]
 
 ↓
 
@@ -73,7 +89,7 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ Ollama : 날짜/키워드 등 기획서 생성 근거 조건 추출 후 MCP-bridge 에 근거 조건 결과 전송 ]
+[ Ollama : qwen2.5-refine-ko 모델이 날짜/키워드 등 기획서 생성 근거 조건 추출 후 MCP-bridge 에 근거 조건 결과 전송 ]
 
 ↓
 
@@ -89,7 +105,7 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ Ollama : 파일 목록을 읽어 종합 요약 생성 후 MCP-bridge 로 전송 ]
+[ Ollama : qwen2.5-refine-ko 모델이 파일 목록을 읽어 종합 요약 생성 후 MCP-bridge 로 전송 ]
 
 ↓
 
@@ -101,7 +117,15 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ Ollama : 기획서 생성 후 waai-backend 로 전송 ] 
+[ Ollama : qwen2-creative-ko 모델이 기획서 생성 후 waai-backend 로 전송 ] 
+
+↓
+
+[ Waai-backend : validate_date_front_matter 함수에서 메타 데이터 유효성 검증 후 누락 발견 시 llm 재호출 ] 
+
+↓
+
+[ Ollama : qwen2-creative-ko 모델이 기획서 재생성 후 응답 ]
 
 ↓
 
@@ -111,7 +135,9 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 [ OpenWebUI  : 생성된 기획서 일부를 UI 에 출력 ]
 
-<img width="893" height="797" alt="image" src="https://github.com/user-attachments/assets/bff85c5f-f63c-44e3-ad93-8b1cdf00169d" />
+<img width="1000" height="851" alt="image" src="https://github.com/user-attachments/assets/3f08556a-b63f-4f73-9618-0d623d41c315" />
+<img width="998" height="678" alt="image" src="https://github.com/user-attachments/assets/b8f3375f-7c29-4e76-ac84-5c3480957fde" />
+
 
 ---------------------------------------------------
 
@@ -123,7 +149,11 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ OpenWebUI : UI와 연동된 waai-backend의 /api/web_search/fetch API 를 호출 ]
+[ OpenWebUI : 사용자 프롬프트와 /api/web_search/fetch API 호출을 LLM 에게 요청 ]
+
+↓
+
+[ Ollama : 사용자 프롬프트와 도구 호출 여부를 검토하여 waai-backend의 /api/web_search/fetch API 도구 호출 ]
 
 ↓
 
@@ -147,13 +177,18 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ Waai-backend : 데이터를 종합하여 /waai/data/web_research/ 에 데이터(md파일) 저장 ]
+[ Waai-backend : 데이터를 종합하여 /home/witness/memory/webresearch/ 에 raw_data 저장 ]
 
 ↓
 
 [ OpenWebUI : 최종 응답을 기반으로 조사된 링크 목록을 사용자에게 출력 ]
 
-<img width="529" height="821" alt="image" src="https://github.com/user-attachments/assets/8854aefa-c749-478b-b372-f54c90ced8c7" />
+↓
+
+[ data-format-bot : data/reformat-md API 호출을 통해 데이터 정제 수행 ]
+
+<img width="421" height="894" alt="image" src="https://github.com/user-attachments/assets/e89572d3-f9ce-4455-a137-6501df43a3ec" />
+
 
 ---------------------------------------------------
 
@@ -161,11 +196,15 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ### 동작 로직
 
-[ User : 입력된 원고를 프롬프트에 입력
+[ User : 입력된 원고를 프롬프트에 입력 ]
 
 ↓
 
-[ OpenWebUI : waai-backend 에 /api/critique API 호출 ]
+[ OpenWebUI : LLM 에게 waai-backend 에 원고와 /api/critique API 호출 요청 ]
+
+↓
+
+[ Ollama : qweb2.5-refine-ko 모델이 도구 호출 여부를 검토하여 waai-backend 에 /api/critique API 호출 ]
 
 ↓
 
@@ -181,7 +220,15 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 ↓
 
-[ Ollama : 합평 기준별로 원고를 읽고 점수 책정 및 결과 도출 후 waai-backend 로 결과 전송 ]
+[ Ollama : qweb2.5-refine-ko 모델이 합평 기준별로 원고를 읽고 점수 책정 및 결과 도출 후 waai-backend 로 결과 전송 ]
+
+↓
+
+[ Waai-backend : validate_date_front_matter 함수에서 메타 데이터 유효성 검증 후 누락 발견 시 llm 재호출 ] 
+
+↓
+
+[ Ollama : qweb2.5-refine-ko 모델이 합평 결과 재생성 후 응답 ]
 
 ↓
 
@@ -191,47 +238,48 @@ WAAI 는 사용자가 기록한 일기를 기반으로 시간대별로 mood 와 
 
 [ OpenWebUI : 완성된 합평 결과 일부를 UI 에 출력 ]
 
-<img width="696" height="784" alt="image" src="https://github.com/user-attachments/assets/f7e4b636-e1a3-4bd4-90c9-2fc6556afa16" />
+<img width="536" height="895" alt="image" src="https://github.com/user-attachments/assets/f833ac26-2201-45a6-9803-77f1dd2b1ccf" />
+
+
+---------------------------------------------------
+
+### 다섯. 브레인스토밍
+
+### 동작 로직
+
+[ 사용자 프롬프트 : qwen2-brainstorm-ko 모델을 활용해서 다양하게 아이디어 주고받기 ]
+
+↓
+
+[ 사용자 프롬프트 : /api/brainstorm/finalize 를 호출하여 지금까지의 채팅을 바탕으로 아이디어 생성 요청 ]
+
+↓
+
+[ Ollama : qwen2-brainstorm-ko 모델이 /api/brianstorm/finalize API 호출 ]
+
+↓
+
+[ Waai-backend : /api/brainstorm/finalize 함수 실행 전 가장 최근 채팅방의 모든메시지 조회하여 200개 소팅 ]
+
+↓
+
+[ Waai-backend : LLM 에게 아이디어 구체화 요청 ]
+
+↓
+
+[ Ollama : qwen2-brainstorm-ko 모델이 주어진 데이터를 기반으로 주요 아이디어 3개를 1000자 이내로 각각 구체화하고, 이를 /home/witness/memory/ideas/ 에 txt 파일로 각각 저장 ]
+
+↓
+
+[ Data-format-bot : 생성된 ideas.txt 파일들을 data/reformat-md 로 정제 ]
+
+<img width="697" height="894" alt="image" src="https://github.com/user-attachments/assets/29bc10dd-2d12-413b-bf19-72dc3efd0a00" />
 
 ---------------------------------------------------
 
 ## 6. 사용 기술 (Tech Stack)
 
 하나. Core Architecture
-
-## RAG 인덱싱/실행 가이드 (V4.0 추가)
-
-### 인덱싱 순서(권장)
-- 1) web_research, bible : 외부 자료/메모 먼저
-- 2) critique/criteria   : 합평 기준 14개 이상 확보
-- 3) ideas, works        : 창작 아이디어/기존 작품
-- 4) diary               : 일기 데이터
-
-### 초기 인덱싱 커맨드 예시
-```bash
-curl -X POST http://localhost:8000/api/rag/index_all \
-  -H "Content-Type: application/json" \
-  -d '{
-    "doc_types": [
-      "web_research", "bible",
-      "critique_criteria", "critique", "critique/results",
-      "ideas", "works",
-      "diary"
-    ],
-    "force": true
-  }'
-```
-
-### 환경변수 주요 목록
-- `OLLAMA_BASE_URL` (기본 `http://ollama:11434`)
-- `OLLAMA_EMBED_MODEL` (예: `nomic-embed-text`)
-- `CHROMA_PERSIST_DIR` (기본 `/waai/chroma`, 권한 안 되면 `~/.waai/chroma` 폴백)
-- `CHROMA_COLLECTION` (기본 `documents`)
-- 기존 설정: `OUTPUT_ROOT`, `CRITIQUE_*`, `DIARY_ROOT`, `IDEAS_ROOT`, `WEB_RESEARCH_ROOT`, `WORKS_ROOT`, `BIBLE_ROOT`, `PLAYWRIGHT_MCP_URL` 등
-
-### 폴백 전략 (use_rag=false)
-- 기획/합평 요청에서 `use_rag=false`이거나 RAG 쿼리 실패 시 자동으로 기존 V3.4 MCP 요약/합평 흐름으로 폴백합니다.
-- RAG 미사용 상태에서도 기존 기능은 동일하게 동작하며, RAG 사용 시에만 citations md가 생성되고 [S번호] 인용이 강제됩니다.
   - Docker / Docker Compose (컨테이너로 분리)
   - Microservice-oriented Design (Backend / MCP / Bot / UI)
 
@@ -245,6 +293,10 @@ curl -X POST http://localhost:8000/api/rag/index_all \
   - Ollama
   - Qwen
   - Prompt Engineering (목적별 프롬프트 분리)
+  - Modelfiles (목적별 모델 파라미터 최적화)
+    - qwen2.5-refine-ko : 데이터 정제, 합평, 기획서 생성 전 프롬프트 조건 추출, 파일 종합 요약 등
+    - qwen2-creative-ko : 기획서 생성
+    - qwen2-brainstorm-ko : 브레인스토밍 전용 아이디어 확장
 
 넷. MCP (Model Context Protocol)
   - MCP Filesystem Server (파일 리소스 제공, 조건 기반 파일 필터링)
@@ -276,7 +328,9 @@ curl -X POST http://localhost:8000/api/rag/index_all \
 열. Design Philosophy
   - Human-readable AI : 모든 AI 결과는 사람이 읽고 검토 가능한 문서로 남긴다
   - LLM is a Reasoner, not a Database : 의미, 해석, 창작은 LLM이 / 구조, 보장은 코드가 수행
-  - 점진적 고도화 수행 중 : V2(일기 기반) -> V3(데이터 확장 및 웹검색, 합평 기능) -> V4(VectorDB/RAG 시스템) -> V5(학습모델)
+  - 점진적 고도화 수행 중 :
+    [완료] V1(프로토타입; 기본 대화형 AI) -> V2(일기 기반 기획서 생성 AI) -> V3(데이터(ideas,bible,works,web_research) 확장, 기능 확장(웹검색, 합평, 브레인스토밍 기능), 목적별 모델 최적화, 모니터링 고도화)
+    [계획] -> V4(VectorDB/RAG 시스템) -> V5(학습모델)
 
 
 ## 7. 실행 방법 (How To Run)
@@ -294,11 +348,11 @@ docker compose up -d --build 를 통해 이미지를 생성하면 필요한 프�
 
 ## 9. 이 프로젝트를 통해 얻은 것 (Lesson & Learn)
 
-하나. LLM 서비스가 어떠한 방식으로 동작하는지 이해하게 됐습니다. 모두 구현하는 줄 알았지만 실질적으로는 LLM 은 이미 생성된 모델을 사용하고, API 를 통해 거대언어모델을 사용하는 구조를 이해했습니다. 
+하나. LLM 서비스가 어떠한 방식으로 동작하는지 이해하게 됐습니다. 모두 구현하는 줄 알았지만 실질적으로는 LLM 은 이미 생성된 모델을 사용하고, API 를 통해 거대언어모델을 다양한 방식으로 호출하여 여러 결과물을 얻는 구조를 이해했습니다. 
 
 둘. MCP와 LLM 이 어떻게 상호작용할 수 있는지 이해했습니다. LLM 은 '뇌'역할을, MCP 는 '손'과 '발'이 된다는 것이 어떠한 이유에서 표현된 것인지 알게 됐습니다. 
-고 ChatGPT와 같은 범용 거대언어모델에서 '도구'라는 개념이 어떤식으로 구현되는지 (API 통해 백엔드 기능 호출), 사용자 프롬프트를 어떤 API로 전송해서 llm 에게 질의하여 어떤 시너지를 낼 수 있는지를 확인했습니다. 
+ChatGPT와 같은 범용 거대언어모델에서 '도구'라는 개념이 어떤식으로 구현되는지 (API 통해 백엔드 기능 호출), 사용자 프롬프트를 어떤 API로 전송해서 llm 에게 질의하여 어떤 시너지를 낼 수 있는지를 확인했습니다. 
 
-셋. LLM 을 잘 활용하면 기존에 사람 한 명이 하던 일을 둘, 셋 이 하는 것처럼 효율을 낼 수 있습니다. 그리고 '학습'이라는 특성으로 인해 시간이 지날수록 최적화된 모델을 사용할 수 있다는 것이 매력포인트입니다. 
+셋. LLM 의 모델 파라미터의 조정과 목적별 모델을 분기하여 다른 형태의 결과물을 다양하게 얻을 수 있다는 것을 깨달았습니다. 규격에 맞춘 모델, 기획서 생성 모델, 창의력 모델 등등 같은 모델이어도 파라미터를 통해 모델의 출력을 조정할 수 있습니다.
 
-마지막. 최종적으로 WAAI 라는 나만의 보조 작가 AI를 얻게 되었습니다. 앞으로 고도화할 길이 멀지만, 하나씩 차근차근 기능을 추가해가면서 나만의 강력한 보조 작가 AI 로서 성장시킬 것입니다.
+마지막. 최종적으로 WAAI 라는 나만의 보조 작가 AI를 얻게 되었습니다. 앞으로 고도화할 길이 멀지만, 하나씩 차근차근 기능을 추가해가면서 강력한 보조 작가 AI 로서 성장시킬 것입니다.
